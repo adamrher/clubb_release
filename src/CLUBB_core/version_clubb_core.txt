@@ -1,0 +1,91 @@
+commit a1bc7132bad1616530c67bbf98b3d0ccfa3e0dc0
+Author: vlarson <vlarson@uwm.edu>
+Date:   Wed Aug 23 14:15:19 2023 -0500
+
+    Adds basic cost function printouts to QuadTune.
+    Also adds SWCF_RMSE metric.
+    
+    For #910.
+
+commit 8f7ec02116293f4a2f09d5a92edbf87e56686e5e
+Author: vlarson <vlarson@uwm.edu>
+Date:   Mon Aug 21 13:45:28 2023 -0500
+
+    Fixes bug in QuadTune's code that prescribes parameter values.
+    Also fixes divide-by-zero warning message in dpMin2Pt plotting code.
+    
+    For #910.
+
+commit ad7158d4527e636e07a389e813d60013ab2afccb
+Author: vlarson <vlarson@uwm.edu>
+Date:   Fri Aug 18 15:28:17 2023 -0500
+
+    Hides print statements in RegTune by using beVerbose=False.
+    
+    For #910.
+
+commit 9d35ffa7e05b85efb23d21700bcf355f007c2b7d
+Author: vlarson <vlarson@uwm.edu>
+Date:   Thu Aug 17 16:49:07 2023 -0500
+
+    For RegTune, adds capability to prescribe (not tune) a parameter
+    to a value that is different from the default.
+    The code has not been checked, but it does run and produce plots.
+    
+    For #910.
+
+commit 3ac0cb6b68cff942267f3230f210eaab5aedc182
+Author: vlarson <vlarson@uwm.edu>
+Date:   Wed Aug 16 17:04:19 2023 -0500
+
+    Creates new function, setUpPreliminaries, in RegTune.
+    setUpPreliminaries calculates some basic quantities
+    that are used later.
+    As part of this refactoring, a number of functions
+    were moved from analyze_sensitivity_matrix to
+    set_up_dashboard_inputs.
+    
+    For #910.
+
+commit 31f76a7219f3ed336cc7b2b1159cae4781e67289
+Author: vlarson <vlarson@uwm.edu>
+Date:   Wed Aug 16 10:42:06 2023 -0500
+
+    For clarity, renames figures in RegTune.
+    
+    For #910.
+
+commit edccdfbf9c5f8ed7c089bee46e30801098af8841
+Author: vlarson <vlarson@uwm.edu>
+Date:   Wed Aug 16 08:48:18 2023 -0500
+
+    For RegTune, adds color-coded matrix of correlations among parameter vectors.
+    Also, this commit separates the three-dot panel plot into its own function.
+    
+    For #910.
+
+commit b0101dc46f5324451c8273188032bda60d135e41
+Author: vlarson <vlarson@uwm.edu>
+Date:   Tue Aug 8 15:03:44 2023 -0500
+
+    In RegTune, normalizes metrics by a user-specified number
+    rather than the observed value of the metric.
+    
+    For #910.
+
+commit 9ada7441e588502eeb7f757cd0d618d8803bd08d
+Author: vlarson <vlarson@uwm.edu>
+Date:   Tue Aug 8 09:21:11 2023 -0500
+
+    For RegTune, defaults to polynomial fit for sensitivity matrix
+    and adds observations of sea-level pressure (PSL).
+    
+    For #910.
+
+commit 9324242cc87f0d692e5bc39f32ac50f3be0b928b
+Author: vlarson <vlarson@uwm.edu>
+Date:   Thu Aug 3 14:27:51 2023 -0500
+
+    For RegTune, adds quadratic curves to three-dot plot.
+    
+    For #910.
