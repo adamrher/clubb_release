@@ -2697,8 +2697,12 @@ module advance_xm_wpxp_module
 
         do k = 1, nz
           do i = 1, ngrdcol
-            um_tndcy(i,k) = zero
-            vm_tndcy(i,k) = zero
+!+++ARH
+            !um_tndcy(i,k) = zero
+            !vm_tndcy(i,k) = zero
+            um_tndcy(i,k) = um_forcing(i,k)
+            vm_tndcy(i,k) = vm_forcing(i,k)
+!---ARH
           end do
         end do
 

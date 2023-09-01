@@ -1971,7 +1971,10 @@ module advance_windm_edsclrm_module
 
     else   ! implemented in a host model.
 
-      xm_tndcy(:,:) = 0.0_core_rknd
+!+++ARH
+      !xm_tndcy(:,:) = 0.0_core_rknd
+      xm_tndcy(:,:) = xm_forcing(:,:)
+!---ARH
 
     endif
 
