@@ -243,7 +243,6 @@ module constants_clubb
     ep  = Rd / Rv,    & ! ep  = 0.622  [-]
     ep1 = (1.0-ep)/ep,& ! ep1 = 0.61   [-]
     ep2 = 1.0/ep        ! ep2 = 1.61   [-]
-  !$acc declare create(ep)
 
   real( kind = core_rknd ), parameter, public :: & 
     kappa = Rd / Cp     ! kappa        [-]
@@ -283,7 +282,6 @@ module constants_clubb
     ep  = Rd / Rv,    & ! ep  = 0.622_core_rknd  [-]
     ep1 = (1.0_core_rknd-ep)/ep,& ! ep1 = 0.61_core_rknd   [-]
     ep2 = 1.0_core_rknd/ep        ! ep2 = 1.61_core_rknd   [-]
-!$acc declare create(ep)
 
   real( kind = core_rknd ), parameter, public :: & 
     kappa = Rd / Cp     ! kappa        [-]
@@ -307,10 +305,10 @@ module constants_clubb
 
   ! Tolerances below which we consider moments to be zero
   real( kind = core_rknd ), parameter, public ::  & 
-    w_tol        = 2.e-2_core_rknd, & ! [m/s]
-    thl_tol      = 1.e-2_core_rknd, & ! [K]
-    rt_tol       = 1.e-8_core_rknd, & ! [kg/kg]
-    chi_tol = 1.e-8_core_rknd, & ! [kg/kg]
+    w_tol   = 2.e-2_core_rknd, & ! [m/s]
+    thl_tol = 1.e-2_core_rknd, & ! [K]
+    rt_tol  = max( 1.e-8_core_rknd, epsilon(pi) ), & ! [kg/kg]
+    chi_tol = max( 1.e-8_core_rknd, epsilon(pi) ), & ! [kg/kg]
     eta_tol = chi_tol       ! [kg/kg]
 
   ! Tolerances for use by the monatonic flux limiter.

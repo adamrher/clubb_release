@@ -15,6 +15,9 @@ program jacobian
   use clubb_driver, only:  & 
       run_clubb ! Procedure(s)
 
+  use clubb_driver, only: &
+      stats_metadata
+
   use parameter_indices, only:  & 
       nparams ! Variable(s)
 
@@ -32,16 +35,12 @@ program jacobian
       stat_file_num_vertical_levels, &
       stat_file_vertical_levels
 
-  use stats_variables, only:  & 
-      fname_zt,  & ! Variable(s) 
-      fname_zm
-
   use error_code, only: &
         clubb_at_least_debug_level,  & ! Procedure
         err_code,                    & ! Error Indicator
         clubb_fatal_error              ! Constant
 
-  use parameters_model, only: &
+  use clubb_model_settings, only: &
     PosInf ! Variable(s)
 
   use clubb_precision, only: &
@@ -58,7 +57,7 @@ program jacobian
 
     character(len=32), pointer :: name(:)
 
-    real( kind = core_rknd ), pointer :: value(:)
+    real( kind = core_rknd ), pointer :: value(:,:)
 
   end type param_array
   !----------------------------------------------------------------------------
@@ -145,7 +144,8 @@ program jacobian
     C_invrs_tau_shear, C_invrs_tau_N2, C_invrs_tau_N2_wp2, &
     C_invrs_tau_N2_xp2, C_invrs_tau_N2_wpxp, C_invrs_tau_N2_clear_wp3, &
     C_invrs_tau_wpxp_Ri, C_invrs_tau_wpxp_N2_thresh, &
-    Cx_min, Cx_max, Richardson_num_min, Richardson_num_max, a3_coef_min, a_const, bv_efold
+    Cx_min, Cx_max, Richardson_num_min, Richardson_num_max, &
+    wpxp_Ri_exp, a3_coef_min, a_const, bv_efold, z_displace
 
   ! Namelists
   namelist /jcbn_nml/  & 
@@ -179,8 +179,8 @@ program jacobian
                C_invrs_tau_N2_wp2, C_invrs_tau_N2_xp2, &
                C_invrs_tau_N2_wpxp, C_invrs_tau_N2_clear_wp3, &
                C_invrs_tau_wpxp_Ri, C_invrs_tau_wpxp_N2_thresh, &
-               Cx_min, Cx_max, Richardson_num_min, &
-               Richardson_num_max, a3_coef_min, a_const, bv_efold )
+               Cx_min, Cx_max, Richardson_num_min, Richardson_num_max, &
+               wpxp_Ri_exp, a3_coef_min, a_const, bv_efold, z_displace )
 
   ! Use an internal file write to specify the write format for the jacobian_matrix.txt
   ! and impact_matrix.txt files.
@@ -188,7 +188,7 @@ program jacobian
 
   times(1:10) = 0
 
-  allocate( clubb_params%value( nparams ),  & 
+  allocate( clubb_params%value( 1, nparams ),  & 
             clubb_params%name( nparams ), & 
             stat=alloc_stat )
   if (alloc_stat /= 0 ) error stop "allocate failed"
@@ -202,7 +202,7 @@ program jacobian
   close( unit=10 )
 
   if ( .not. l_use_standard_vars ) then
-    call read_parameters( 10, 'jacobian.in', &
+    call read_parameters( 1, 10, 'jacobian.in', &
                           C1, C1b, C1c, C2rt, C2thl, C2rtthl, &
                           C4, C_uu_shr, C_uu_buoy, C6rt, C6rtb, C6rtc, &
                           C6thl, C6thlb, C6thlc, C7, C7b, C7c, C8, C8b, C10, &
@@ -225,12 +225,12 @@ program jacobian
                           C_invrs_tau_N2_wp2, C_invrs_tau_N2_xp2, &
                           C_invrs_tau_N2_wpxp, C_invrs_tau_N2_clear_wp3, &
                           C_invrs_tau_wpxp_Ri, C_invrs_tau_wpxp_N2_thresh, &
-                          Cx_min, Cx_max, Richardson_num_min, &
-                          Richardson_num_max, a3_coef_min, a_const, bv_efold, &
+                          Cx_min, Cx_max, Richardson_num_min, Richardson_num_max, &
+                          wpxp_Ri_exp, a3_coef_min, a_const, bv_efold, z_displace, &
                           clubb_params%value )
 
   else
-    call read_parameters( 10, "", &
+    call read_parameters( 1, 10, "", &
                           C1, C1b, C1c, C2rt, C2thl, C2rtthl, &
                           C4, C_uu_shr, C_uu_buoy, C6rt, C6rtb, C6rtc, &
                           C6thl, C6thlb, C6thlc, C7, C7b, C7c, C8, C8b, C10, &
@@ -253,8 +253,8 @@ program jacobian
                           C_invrs_tau_N2_wp2, C_invrs_tau_N2_xp2, &
                           C_invrs_tau_N2_wpxp, C_invrs_tau_N2_clear_wp3, &
                           C_invrs_tau_wpxp_Ri, C_invrs_tau_wpxp_N2_thresh, &
-                          Cx_min, Cx_max, Richardson_num_min, &
-                          Richardson_num_max, a3_coef_min, a_const, bv_efold, &
+                          Cx_min, Cx_max, Richardson_num_min, Richardson_num_max, &
+                          wpxp_Ri_exp, a3_coef_min, a_const, bv_efold, z_displace, &
                           clubb_params%value )
 
   end if
@@ -266,11 +266,10 @@ program jacobian
 
   do i = 1, clubb_params%entries, 1
     write(unit=*,fmt='(a27,2f12.5)') trim( clubb_params%name(i) ),  & 
-      clubb_params%value(i), clubb_params%value(i) * delta_factor
+      clubb_params%value(1,i), clubb_params%value(1,i) * delta_factor
   end do
 
-  call run_clubb  & 
-       ( clubb_params%value(:), 'jacobian.in', .false. )
+  call run_clubb( 1, clubb_params%value(1,:), 'jacobian.in', .false. )
 
   if ( clubb_at_least_debug_level( 0 ) ) then
     if ( err_code == clubb_fatal_error ) then
@@ -280,8 +279,8 @@ program jacobian
 
   ! Obtain number of vertical levels from the generated GrADS files
 
-  nzt = stat_file_num_vertical_levels( "thlm", "../output/"//trim( fname_zt )//".ctl" )
-  nzm = stat_file_num_vertical_levels( "thlm", "../output/"//trim( fname_zm )//".ctl" )
+  nzt = stat_file_num_vertical_levels( "thlm", "../output/"//trim( stats_metadata%fname_zt )//".ctl" )
+  nzm = stat_file_num_vertical_levels( "thlm", "../output/"//trim( stats_metadata%fname_zm )//".ctl" )
 
   ! Initialize the structures holding the variables
 
@@ -301,9 +300,9 @@ program jacobian
   var2zt%nz      = nzt
 
   var1zt%z = stat_file_vertical_levels &
-    ( var1zt%name(1), "../output/"//trim( fname_zt )//".ctl", nzt )
+    ( var1zt%name(1), "../output/"//trim( stats_metadata%fname_zt )//".ctl", nzt )
   var2zt%z = stat_file_vertical_levels &
-    ( var1zt%name(1), "../output/"//trim( fname_zt )//".ctl", nzt )
+    ( var1zt%name(1), "../output/"//trim( stats_metadata%fname_zt )//".ctl", nzt )
 
   allocate( var1zm%value(nzm, nvarzm), & 
             var2zm%value(nzm, nvarzm), & 
@@ -321,9 +320,9 @@ program jacobian
   var2zm%nz      = nzm
 
   var1zm%z = stat_file_vertical_levels &
-    ( var1zm%name(1), "../output/"//trim( fname_zm )//".ctl", nzm )
+    ( var1zm%name(1), "../output/"//trim( stats_metadata%fname_zm )//".ctl", nzm )
   var2zm%z = stat_file_vertical_levels &
-    ( var1zm%name(1), "../output/"//trim( fname_zm )//".ctl", nzm )
+    ( var1zm%name(1), "../output/"//trim( stats_metadata%fname_zm )//".ctl", nzm )
 
   var1zt%name(1:nvarzt) =  & 
   (/"cloud_frac  ", "rcm         ", "rtm         ", & 
@@ -357,16 +356,15 @@ program jacobian
 
   ! Set var1 fields with initial run results
 
-  call getvariables( var1zt, trim( fname_zt )//".ctl" )
+  call getvariables( var1zt, trim( stats_metadata%fname_zt )//".ctl" )
 
-  call getvariables( var1zm, trim( fname_zm )//".ctl" )
+  call getvariables( var1zm, trim( stats_metadata%fname_zm )//".ctl" )
 
   do i = 1, clubb_params%entries
-    tmp_param = clubb_params%value(i)
-    clubb_params%value(i) = clubb_params%value(i) * delta_factor
+    tmp_param = clubb_params%value(1,i)
+    clubb_params%value(1,i) = clubb_params%value(1,i) * delta_factor
 
-    call run_clubb & 
-      ( clubb_params%value(:), 'jacobian.in', .false. )
+    call run_clubb( 1, clubb_params%value(1,:), 'jacobian.in', .false. )
 
     ! Print a period so the user knows something is happening
     write(unit=fstdout, fmt='(a1)', advance='no') "."
@@ -375,14 +373,14 @@ program jacobian
 
       ! Pos. Infinity bit pattern
       jmatrix(i,:) = real(PosInf, kind = core_rknd)
-      clubb_params%value(i) = tmp_param
+      clubb_params%value(1,i) = tmp_param
       cycle
     end if
 
     ! Set var2 results with results from altering the constants
 
-    call getvariables( var2zt, trim( fname_zt )//".ctl" )
-    call getvariables( var2zm, trim( fname_zm )//".ctl" )
+    call getvariables( var2zt, trim( stats_metadata%fname_zt )//".ctl" )
+    call getvariables( var2zm, trim( stats_metadata%fname_zm )//".ctl" )
 
     do j = 1, nvarzt
       impact_matrix(i, j) =  & 
@@ -396,7 +394,7 @@ program jacobian
 
     do j = 1, nvarzt
       jmatrix(i, j) = impact_matrix(i, j)  & 
-                    / ( clubb_params%value(i) - tmp_param )
+                    / ( clubb_params%value(1,i) - tmp_param )
     end do
 
     do j = 1, nvarzm
@@ -412,10 +410,10 @@ program jacobian
     do j = 1, nvarzm
       jmatrix(i, j+nvarzt) =  & 
       impact_matrix(i, j+nvarzt)  & 
-       / (clubb_params%value(i) - tmp_param)
+       / (clubb_params%value(1,i) - tmp_param)
     end do
 
-    clubb_params%value(i) = tmp_param ! Set parameter back
+    clubb_params%value(1,i) = tmp_param ! Set parameter back
 
   end do !i = 1..clubb_params%entries
 

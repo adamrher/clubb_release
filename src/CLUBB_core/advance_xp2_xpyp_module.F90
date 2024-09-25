@@ -47,7 +47,7 @@ module advance_xp2_xpyp_module
   contains
 
   !=============================================================================
-  subroutine advance_xp2_xpyp( nz, ngrdcol, gr,                           & ! In
+  subroutine advance_xp2_xpyp( nz, ngrdcol, sclr_dim, sclr_tol, gr, sclr_idx,& ! In
                                invrs_tau_xp2_zm, invrs_tau_C4_zm,         & ! In
                                invrs_tau_C14_zm, wm_zm,                   & ! In
                                rtm, wprtp, thlm, wpthlp, wpthvp, um, vm,  & ! In
@@ -72,7 +72,8 @@ module advance_xp2_xpyp_module
                                l_upwind_xpyp_ta,                          & ! In
                                l_godunov_upwind_xpyp_ta,                  & ! In
                                l_lmm_stepping,                            & ! In
-                               stats_zt, stats_zm, stats_sfc,             & ! intent(inout)
+                               stats_metadata,                            & ! In
+                               stats_zt, stats_zm, stats_sfc,             & ! In
                                rtp2, thlp2, rtpthlp, up2, vp2,            & ! Inout
                                sclrp2, sclrprtp, sclrpthlp)                 ! Inout
 
@@ -107,7 +108,8 @@ module advance_xp2_xpyp_module
         one_third, &
         zero,   &
         eps, &
-        gamma_over_implicit_ts
+        gamma_over_implicit_ts, &
+        zero_threshold
 
     use model_flags, only: & 
         iiPDF_ADG1,       & ! integer constants
@@ -131,10 +133,6 @@ module advance_xp2_xpyp_module
 
     use parameters_tunable, only: &
         nu_vertical_res_dep    ! Type(s)
-
-    use parameters_model, only: &
-        sclr_dim, & ! Variable(s)
-        sclr_tol
 
     use grid_class, only: & 
         grid, & ! Type
@@ -171,16 +169,10 @@ module advance_xp2_xpyp_module
         clubb_fatal_error              ! Constants
 
     use stats_variables, only: &
-        irtp2_cl,                 &
-        iup2_sdmp,                &
-        ivp2_sdmp,                &
-        iup2_cl,                  &
-        ivp2_cl,                  &
-        l_stats_samp
+        stats_metadata_type
 
     use array_index, only: &
-        iisclr_rt, &
-        iisclr_thl
+        sclr_idx_type
         
     use mean_adv, only:  & 
         term_ma_zm_lhs      ! Procedure(s)
@@ -194,10 +186,18 @@ module advance_xp2_xpyp_module
 
     !------------------------------ Input Variables ------------------------------
     integer, intent(in) :: &
-      nz, &
-      ngrdcol
+      nz,       & ! Number of vertical levels
+      ngrdcol,  & ! Number of grid columns
+      sclr_dim    ! Number of passive scalars
+
+    real( kind = core_rknd ), intent(in), dimension(sclr_dim) :: & 
+      sclr_tol          ! Threshold(s) on the passive scalars  [units vary]
     
-    type (grid), target, intent(in) :: gr
+    type (grid), target, intent(in) :: &
+      gr
+
+    type (sclr_idx_type), intent(in) :: &
+      sclr_idx
     
     real( kind = core_rknd ), intent(in), dimension(ngrdcol,nz) ::  & 
       invrs_tau_xp2_zm, & ! Inverse time-scale for xp2 on momentum levels [1/s]
@@ -249,7 +249,7 @@ module advance_xp2_xpyp_module
     real( kind = core_rknd ), dimension(ngrdcol,nz), intent(in) :: & 
       lhs_splat_wp2  ! LHS coefficient of wp2 splatting term  [1/s]
 
-    real( kind = core_rknd ), dimension(nparams), intent(in) :: &
+    real( kind = core_rknd ), dimension(ngrdcol,nparams), intent(in) :: &
       clubb_params    ! Array of CLUBB's tunable parameters    [units vary]
 
     type(nu_vertical_res_dep), intent(in) :: &
@@ -283,6 +283,9 @@ module advance_xp2_xpyp_module
                                    ! It affects rtp2, thlp2, up2, vp2, sclrp2, rtpthlp, sclrprtp, 
                                    ! & sclrpthlp.
       l_lmm_stepping               ! Apply Linear Multistep Method (LMM) Stepping
+
+    type (stats_metadata_type), intent(in) :: &
+      stats_metadata
 
     !------------------------------ Input/Output Variables ------------------------------
     type (stats), target, dimension(ngrdcol), intent(inout) :: &
@@ -319,12 +322,7 @@ module advance_xp2_xpyp_module
     real( kind = core_rknd ) :: & 
       C2rt,    & ! CLUBB tunable parameter C2rt
       C2thl,   & ! CLUBB tunable parameter C2thl
-      C2rtthl, & ! CLUBB tunable parameter C2rtthl
-      C4,      & ! CLUBB tunable parameter C4
-      C14,     & ! CLUBB tunable parameter C14
-      C_K2,    & ! CLUBB tunable parameter C_K2
-      C_K9,    & ! CLUBB tunable parameter C_K9
-      rtp2_clip_coef
+      C2rtthl    ! CLUBB tunable parameter C2rtthl
 
     real( kind = core_rknd ), dimension(ngrdcol,nz) :: & 
       C2sclr_1d, C2rt_1d, C2thl_1d, C2rtthl_1d, &
@@ -413,6 +411,8 @@ module advance_xp2_xpyp_module
 
     ! Loop indices
     integer :: sclr, k, i
+
+    logical :: l_single_solve_possible
     
     !------------------------------ Begin Code ------------------------------
     
@@ -431,31 +431,32 @@ module advance_xp2_xpyp_module
     !$acc              lhs_ta_wpsclrp2, lhs_ta_wprtpsclrp, lhs_ta_wpthlpsclrp, &
     !$acc              rhs_ta_wpsclrp2, rhs_ta_wprtpsclrp, rhs_ta_wpthlpsclrp, &
     !$acc              sclrpthlp_chnge ) 
-    
-    ! Unpack CLUBB tunable parameters
-    C2rt    = clubb_params(iC2rt)
-    C2thl   = clubb_params(iC2thl)
-    C2rtthl = clubb_params(iC2rtthl)
-    C4      = clubb_params(iC4)
-    C14     = clubb_params(iC14)
-    C_K2    = clubb_params(ic_K2)
-    C_K9    = clubb_params(ic_K9)
-    rtp2_clip_coef = clubb_params(irtp2_clip_coef)
 
-    if ( clubb_at_least_debug_level( 0 ) ) then
-      ! Assertion check for C_uu_shr
-      if ( clubb_params(iC_uu_shr) > one &
-           .or. clubb_params(iC_uu_shr) < zero ) then
-        write(fstderr,*) "The C_uu_shr variable is outside the valid range"
-        err_code = clubb_fatal_error
+    if ( clubb_at_least_debug_level( 1 ) ) then
+
+      !$acc parallel loop gang vector default(present) reduction(.or.:err_code)
+      do i = 1, ngrdcol
+
+        ! Assertion check for C_uu_shr
+        if ( clubb_params(i,iC_uu_shr) > one &
+            .or. clubb_params(i,iC_uu_shr) < zero ) then
+          write(fstderr,*) "The C_uu_shr variable is outside the valid range"
+          err_code = clubb_fatal_error
+        end if
+
+        if ( clubb_params(i,iC_uu_buoy) > one &
+            .or. clubb_params(i,iC_uu_buoy) < zero ) then
+          write(fstderr,*) "The C_uu_buoy variable is outside the valid range"
+          err_code = clubb_fatal_error
+        end if
+        
+      end do
+      !$acc end parallel loop
+
+      if ( err_code == clubb_fatal_error ) then
         return
       end if
-      if ( clubb_params(iC_uu_buoy) > one &
-           .or. clubb_params(iC_uu_buoy) < zero ) then
-        write(fstderr,*) "The C_uu_buoy variable is outside the valid range"
-        err_code = clubb_fatal_error
-        return
-      end if
+
     end if
 
     ! Use 3 different values of C2 for rtp2, thlp2, rtpthlp.
@@ -463,15 +464,17 @@ module advance_xp2_xpyp_module
       !$acc parallel loop gang vector collapse(2) default(present)
       do k = 1, nz, 1
         do i = 1, ngrdcol
+
           if ( cloud_frac(i,k) >= cloud_frac_min ) then
-            C2rt_1d(i,k)    = C2rt * max( min_cloud_frac_mult, cloud_frac(i,k) )
-            C2thl_1d(i,k)   = C2thl * max( min_cloud_frac_mult, cloud_frac(i,k) )
-            C2rtthl_1d(i,k) = C2rtthl* max( min_cloud_frac_mult, cloud_frac(i,k) )
+            C2rt_1d(i,k)    = clubb_params(i,iC2rt)    * max( min_cloud_frac_mult, cloud_frac(i,k) )
+            C2thl_1d(i,k)   = clubb_params(i,iC2thl)   * max( min_cloud_frac_mult, cloud_frac(i,k) )
+            C2rtthl_1d(i,k) = clubb_params(i,iC2rtthl) * max( min_cloud_frac_mult, cloud_frac(i,k) )
           else ! cloud_frac(k) < cloud_frac_min
-            C2rt_1d(i,k)    = C2rt
-            C2thl_1d(i,k)   = C2thl
-            C2rtthl_1d(i,k) = C2rtthl
+            C2rt_1d(i,k)    = clubb_params(i,iC2rt)
+            C2thl_1d(i,k)   = clubb_params(i,iC2thl)
+            C2rtthl_1d(i,k) = clubb_params(i,iC2rtthl)
           end if ! cloud_frac(k) >= cloud_frac_min
+
         end do
       end do ! k = 1, nz, 1
       !$acc end parallel loop
@@ -479,9 +482,9 @@ module advance_xp2_xpyp_module
       !$acc parallel loop gang vector collapse(2) default(present)
       do k = 1, nz
         do i = 1, ngrdcol
-          C2rt_1d(i,k)    = C2rt
-          C2thl_1d(i,k)   = C2thl
-          C2rtthl_1d(i,k) = C2rtthl
+          C2rt_1d(i,k)    = clubb_params(i,iC2rt)
+          C2thl_1d(i,k)   = clubb_params(i,iC2thl)
+          C2rtthl_1d(i,k) = clubb_params(i,iC2rtthl)
         end do
       end do
       !$acc end parallel loop
@@ -490,9 +493,9 @@ module advance_xp2_xpyp_module
     !$acc parallel loop gang vector collapse(2) default(present)
     do k = 1, nz
       do i = 1, ngrdcol
-        C2sclr_1d(i,k) = C2rt  ! Use rt value for now
-        C4_1d(i,k)     = two_thirds * C4
-        C14_1d(i,k)    = one_third  * C14
+        C2sclr_1d(i,k) = clubb_params(i,iC2rt)  ! Use rt value for now
+        C4_1d(i,k)     = two_thirds * clubb_params(i,iC4)
+        C14_1d(i,k)    = one_third  * clubb_params(i,iC14)
       end do
     end do
     !$acc end parallel loop
@@ -513,27 +516,18 @@ module advance_xp2_xpyp_module
         ! passive scalars.  The variances and covariances are located on the
         ! momentum levels.  Kw2 is located on the thermodynamic levels.
         ! Kw2 = c_K2 * Kh_zt
-        Kw2(i,k) = C_K2 * Kh_zt(i,k)
+        Kw2(i,k) = clubb_params(i,ic_K2) * Kh_zt(i,k)
 
         ! Kw9 is used for variances up2 and vp2.  The variances are located on
         ! the momentum levels.  Kw9 is located on the thermodynamic levels.
         ! Kw9 = c_K9 * Kh_zt
-        Kw9(i,k) = C_K9 * Kh_zt(i,k)
+        Kw9(i,k) = clubb_params(i,ic_K9) * Kh_zt(i,k)
       end do
     end do
     !$acc end parallel loop
 
-    Kw2_zm = zt2zm( nz, ngrdcol, gr, Kw2 )
-    Kw9_zm = zt2zm( nz, ngrdcol, gr, Kw9 )
-
-    !$acc parallel loop gang vector collapse(2) default(present)
-    do k = 1, nz
-      do i = 1, ngrdcol
-        Kw2_zm(i,k) = max( Kw2_zm(i,k), zero )
-        Kw9_zm(i,k) = max( Kw9_zm(i,k), zero )
-      end do
-    end do
-    !$acc end parallel loop
+    Kw2_zm = zt2zm( nz, ngrdcol, gr, Kw2, zero )
+    Kw9_zm = zt2zm( nz, ngrdcol, gr, Kw9, zero )
 
     if ( l_lmm_stepping ) then
 
@@ -564,15 +558,17 @@ module advance_xp2_xpyp_module
     end if ! l_lmm_stepping
    
     ! Calculate all the explicit and implicit turbulent advection terms 
-    call calc_xp2_xpyp_ta_terms( nz, ngrdcol, gr, wprtp, wprtp2, wpthlp, wpthlp2, wprtpthlp,      & ! In
+    call calc_xp2_xpyp_ta_terms( nz, ngrdcol, sclr_dim, gr,                          & ! In
+                                 wprtp, wprtp2, wpthlp, wpthlp2, wprtpthlp,          & ! In
                                  rtp2, thlp2, rtpthlp, upwp, vpwp, up2, vp2, wp2,    & ! In
                                  wp2_zt, wpsclrp, wpsclrp2, wpsclrprtp, wpsclrpthlp, & ! In
                                  sclrp2, sclrprtp, sclrpthlp,                        & ! In
                                  rho_ds_zt, invrs_rho_ds_zm, rho_ds_zm,              & ! In
                                  wp3_on_wp2, wp3_on_wp2_zt, sigma_sqd_w,             & ! In
                                  pdf_implicit_coefs_terms, l_scalar_calc,            & ! In
-                                 clubb_params(ibeta), iiPDF_type, l_upwind_xpyp_ta,  & ! In
+                                 clubb_params(:,ibeta), iiPDF_type, l_upwind_xpyp_ta,& ! In
                                  l_godunov_upwind_xpyp_ta,                           & ! In 
+                                 stats_metadata,                                     & ! In 
                                  stats_zt,                                           & ! InOut
                                  lhs_ta_wprtp2, lhs_ta_wpthlp2, lhs_ta_wprtpthlp,    & ! Out
                                  lhs_ta_wpup2, lhs_ta_wpvp2, lhs_ta_wpsclrp2,        & ! Out
@@ -591,16 +587,41 @@ module advance_xp2_xpyp_module
     call term_ma_zm_lhs( nz, ngrdcol, wm_zm,              & ! In
                          gr%invrs_dzm, gr%weights_zm2zt,  & ! In
                          lhs_ma )                           ! Out
-                               
-                               
-    if ( ( abs(C2rt - C2thl)   < abs(C2rt + C2thl)   / 2 * eps   .and. &
-           abs(C2rt - C2rtthl) < abs(C2rt + C2rtthl) / 2 * eps ) .and. &
-         ( l_explicit_turbulent_adv_xpyp .or. &
-           .not. l_explicit_turbulent_adv_xpyp .and. iiPDF_type == iiPDF_ADG1 ) ) then
+
+    ! Check if we can use a single LHS to solve
+    if ( l_explicit_turbulent_adv_xpyp .or. &
+         .not. l_explicit_turbulent_adv_xpyp .and. iiPDF_type == iiPDF_ADG1 ) then
+
+        l_single_solve_possible = .true.
+
+        !$acc parallel loop gang vector default(present) reduction(.and.:l_single_solve_possible)
+        do i = 1, ngrdcol
+
+          C2rt    = clubb_params(i,iC2rt)
+          C2thl   = clubb_params(i,iC2thl)
+          C2rtthl = clubb_params(i,iC2rtthl)
+
+          ! Single solve is only possible if C2rt == C2thl == C2rtthl
+          if ( abs(C2rt - C2thl)    > abs(C2rt + C2thl)    / 2 * eps .or. &
+               abs(C2rt - C2rtthl)  > abs(C2rt + C2rtthl)  / 2 * eps  ) then
+            l_single_solve_possible = .false.
+          end if
+
+        end do
+        !$acc end parallel loop
+
+    else 
+
+      l_single_solve_possible = .false.
+
+    end if
+                            
+
+    if ( l_single_solve_possible ) then
            
       ! All left hand side matricies are equal for rtp2, thlp2, rtpthlp, and scalars.
       ! Thus only one solve is neccesary, using combined right hand sides
-      call solve_xp2_xpyp_with_single_lhs( nz, ngrdcol, gr,                                 & ! In
+      call solve_xp2_xpyp_with_single_lhs( nz, ngrdcol, sclr_dim, sclr_tol, gr, sclr_idx,      & ! In
                                            C2rt_1d, invrs_tau_xp2_zm, rtm, thlm, wprtp,     & ! In
                                            wpthlp, rtp2_forcing, thlp2_forcing,             & ! In
                                            rtpthlp_forcing, sclrm, wpsclrp,                 & ! In
@@ -608,15 +629,16 @@ module advance_xp2_xpyp_module
                                            rhs_ta_wprtp2, rhs_ta_wpthlp2,                   & ! In
                                            rhs_ta_wprtpthlp, rhs_ta_wpsclrp2,               & ! In
                                            rhs_ta_wprtpsclrp, rhs_ta_wpthlpsclrp,           & ! In
-                                           dt, l_scalar_calc, l_lmm_stepping, l_stats_samp, & ! In
+                                           dt, l_scalar_calc, l_lmm_stepping,               & ! In
                                            tridiag_solve_method,                            & ! In
+                                           stats_metadata,                                  & ! In
                                            stats_zm, stats_sfc,                             & ! In
                                            rtp2, thlp2, rtpthlp,                            & ! Out
                                            sclrp2, sclrprtp, sclrpthlp )                      ! Out
     else
           
       ! Left hand sides are potentially different, this requires multiple solves
-      call solve_xp2_xpyp_with_multiple_lhs( nz, ngrdcol, gr,                              & ! In
+      call solve_xp2_xpyp_with_multiple_lhs( nz, ngrdcol, sclr_dim, sclr_tol, gr, sclr_idx,   & ! In
                                              C2rt_1d, C2thl_1d, C2rtthl_1d, C2sclr_1d,     & ! In
                                              invrs_tau_xp2_zm, rtm, thlm, wprtp, wpthlp,   & ! In
                                              rtp2_forcing, thlp2_forcing, rtpthlp_forcing, & ! In
@@ -629,8 +651,9 @@ module advance_xp2_xpyp_module
                                              rhs_ta_wprtpthlp, rhs_ta_wpsclrp2,            & ! In
                                              rhs_ta_wprtpsclrp, rhs_ta_wpthlpsclrp,        & ! In
                                              dt, iiPDF_type, l_scalar_calc,                & ! In
-                                             l_lmm_stepping, l_stats_samp,                 & ! In
+                                             l_lmm_stepping,                               & ! In
                                              tridiag_solve_method,                         & ! In
+                                             stats_metadata,                               & ! In
                                              stats_zm, stats_sfc,                          & ! In
                                              rtp2, thlp2, rtpthlp,                         & ! Out
                                              sclrp2, sclrprtp, sclrpthlp )                   ! Out
@@ -689,16 +712,18 @@ module advance_xp2_xpyp_module
                             wp2, wpthvp, & ! In
                             C4_1d, invrs_tau_C4_zm, C14_1d, invrs_tau_C14_zm, & ! In
                             um, vm, upwp, vpwp, up2, vp2, & ! In
-                            thv_ds_zm, C4, clubb_params(iC_uu_shr), & ! In
-                            clubb_params(iC_uu_buoy), C14, lhs_splat_wp2, & ! In
+                            thv_ds_zm, clubb_params(:,iC4), clubb_params(:,iC_uu_shr), & ! In
+                            clubb_params(:,iC_uu_buoy), clubb_params(:,iC14), lhs_splat_wp2, & ! In
                             lhs_ta_wpup2, rhs_ta_wpup2, & ! In
                             lhs_dp1_C4, lhs_dp1_C14, & ! In
+                            stats_metadata, & ! In
                             stats_zm, & ! intent(inout)
                             uv_rhs(:,:,1) ) ! Out
 
       ! Solve the tridiagonal system
        call xp2_xpyp_solve( nz, ngrdcol, xp2_xpyp_up2_vp2, 1, & ! Intent(in)
                             tridiag_solve_method,             & ! Intent(in)
+                            stats_metadata,                   & ! Intent(in)
                             stats_sfc,                        & ! intent(inout)
                             uv_rhs, lhs,                      & ! Intent(inout)
                             uv_solution )                       ! Intent(out)
@@ -709,12 +734,13 @@ module advance_xp2_xpyp_module
         up2 = one_half * ( up2_old + up2 )
       end if
 
-      if ( l_stats_samp ) then
+      if ( stats_metadata%l_stats_samp ) then
         do i = 1, ngrdcol
           call xp2_xpyp_implicit_stats( nz, xp2_xpyp_up2, up2(i,:), & !intent(in)
                                         gamma_over_implicit_ts*lhs_dp1_C14(i,:), &
                                         gamma_over_implicit_ts*lhs_dp1_C4(i,:), &
                                         lhs_diff_uv(:,i,:), lhs_ta_wpup2(:,i,:), lhs_ma(:,i,:), &
+                                        stats_metadata, & 
                                         stats_zm(i) ) ! intent(inout)
         end do
       endif
@@ -729,16 +755,18 @@ module advance_xp2_xpyp_module
                             wp2, wpthvp, & ! In
                             C4_1d, invrs_tau_C4_zm, C14_1d, invrs_tau_C14_zm, & ! In
                             vm, um, vpwp, upwp, vp2, up2, & ! In
-                            thv_ds_zm, C4, clubb_params(iC_uu_shr), & ! In
-                            clubb_params(iC_uu_buoy), C14, lhs_splat_wp2, & ! In
+                            thv_ds_zm, clubb_params(:,iC4), clubb_params(:,iC_uu_shr), & ! In
+                            clubb_params(:,iC_uu_buoy), clubb_params(:,iC14), lhs_splat_wp2, & ! In
                             lhs_ta_wpvp2, rhs_ta_wpvp2, & ! In
                             lhs_dp1_C4, lhs_dp1_C14, & ! In
+                            stats_metadata, & ! In
                             stats_zm, & ! intent(inout)
                             uv_rhs(:,:,1) ) ! Out
 
       ! Solve the tridiagonal system
       call xp2_xpyp_solve( nz, ngrdcol, xp2_xpyp_up2_vp2, 1,  & ! Intent(in)
                            tridiag_solve_method,              & ! Intent(in)
+                           stats_metadata,                    & ! Intent(in)
                            stats_sfc,                         & ! intent(inout)
                            uv_rhs, lhs,                       & ! Intent(inout)
                            uv_solution )                        ! Intent(out)
@@ -749,12 +777,13 @@ module advance_xp2_xpyp_module
         vp2 = one_half * ( vp2_old + vp2 )
       end if
 
-      if ( l_stats_samp ) then
+      if ( stats_metadata%l_stats_samp ) then
         do i = 1, ngrdcol
           call xp2_xpyp_implicit_stats( nz, xp2_xpyp_vp2, vp2(i,:), & !intent(in)
                                         gamma_over_implicit_ts*lhs_dp1_C14(i,:), &
                                         gamma_over_implicit_ts*lhs_dp1_C4(i,:), &
                                         lhs_diff_uv(:,i,:), lhs_ta_wpvp2(:,i,:), lhs_ma(:,i,:), &
+                                        stats_metadata, & 
                                         stats_zm(i) ) ! intent(inout)
         end do
       endif
@@ -773,10 +802,11 @@ module advance_xp2_xpyp_module
                             wp2, wpthvp, & ! In
                             C4_1d, invrs_tau_C4_zm, C14_1d, invrs_tau_C14_zm, & ! In
                             um, vm, upwp, vpwp, up2, vp2, & ! In
-                            thv_ds_zm, C4, clubb_params(iC_uu_shr), & ! In
-                            clubb_params(iC_uu_buoy), C14, lhs_splat_wp2, & ! In
+                            thv_ds_zm, clubb_params(:,iC4), clubb_params(:,iC_uu_shr), & ! In
+                            clubb_params(:,iC_uu_buoy), clubb_params(:,iC14), lhs_splat_wp2, & ! In
                             lhs_ta_wpup2, rhs_ta_wpup2, & ! In
                             lhs_dp1_C4, lhs_dp1_C14, & ! In
+                            stats_metadata, & ! In
                             stats_zm, & ! intent(inout)
                             uv_rhs(:,:,1) ) ! Out
 
@@ -785,17 +815,19 @@ module advance_xp2_xpyp_module
                             wp2, wpthvp, & ! In
                             C4_1d, invrs_tau_C4_zm, C14_1d, invrs_tau_C14_zm, & ! In
                             vm, um, vpwp, upwp, vp2, up2, & ! In
-                            thv_ds_zm, C4, clubb_params(iC_uu_shr), & ! In
-                            clubb_params(iC_uu_buoy), C14, lhs_splat_wp2, & ! In
+                            thv_ds_zm, clubb_params(:,iC4), clubb_params(:,iC_uu_shr), & ! In
+                            clubb_params(:,iC_uu_buoy), clubb_params(:,iC14), lhs_splat_wp2, & ! In
                             lhs_ta_wpup2, rhs_ta_wpvp2, & ! In
                             lhs_dp1_C4, lhs_dp1_C14, & ! In
+                            stats_metadata, & ! In
                             stats_zm, & ! intent(inout)
                             uv_rhs(:,:,2) ) ! Out
 
       ! Solve the tridiagonal system
       call xp2_xpyp_solve( nz, ngrdcol, xp2_xpyp_up2_vp2, 2, & ! Intent(in)
                            tridiag_solve_method,             & ! Intent(in)
-                           stats_sfc,                        & ! intent(inout)
+                           stats_metadata,                   & ! Intent(in)
+                           stats_sfc,                        & ! Intent(inout)
                            uv_rhs, lhs,                      & ! Intent(inout)
                            uv_solution )                       ! Intent(out)
 
@@ -819,7 +851,7 @@ module advance_xp2_xpyp_module
         !$acc end parallel loop
       end if
 
-      if ( l_stats_samp ) then
+      if ( stats_metadata%l_stats_samp ) then
 
         !$acc update host( up2, lhs_diff_uv, lhs_ta_wpup2, &
         !$acc              lhs_ma, vp2, lhs_dp1_C4, lhs_dp1_C14 )
@@ -829,11 +861,13 @@ module advance_xp2_xpyp_module
                                         gamma_over_implicit_ts*lhs_dp1_C14(i,:), &
                                         gamma_over_implicit_ts*lhs_dp1_C4(i,:), &
                                         lhs_diff_uv(:,i,:), lhs_ta_wpup2(:,i,:), lhs_ma(:,i,:), &
+                                        stats_metadata, & 
                                         stats_zm(i) ) ! intent(inout)
           call xp2_xpyp_implicit_stats( nz, xp2_xpyp_vp2, vp2(i,:), & !intent(in)
                                         gamma_over_implicit_ts*lhs_dp1_C14(i,:), &
                                         gamma_over_implicit_ts*lhs_dp1_C4(i,:), &
                                         lhs_diff_uv(:,i,:), lhs_ta_wpup2(:,i,:), lhs_ma(:,i,:), &
+                                        stats_metadata, &
                                         stats_zm(i) ) ! intent(inout)
         end do
       endif
@@ -846,21 +880,25 @@ module advance_xp2_xpyp_module
       call pos_definite_variances( nz, ngrdcol, gr,               & ! In
                                    xp2_xpyp_rtp2, dt, rt_tol**2,  & ! In
                                    rho_ds_zm, rho_ds_zt,          & ! In
+                                   stats_metadata,                & ! In
                                    stats_zm,                      & ! InOut
                                    rtp2 )                           ! InOut
       call pos_definite_variances( nz, ngrdcol, gr,                 & ! In
                                    xp2_xpyp_thlp2, dt, thl_tol**2,  & ! In
                                    rho_ds_zm, rho_ds_zt,            & ! In
+                                   stats_metadata,                  & ! In
                                    stats_zm,                        & ! InOut
                                    thlp2 )                            ! InOut
       call pos_definite_variances( nz, ngrdcol, gr,                 & ! In
                                    xp2_xpyp_up2, dt, w_tol_sqd,     & ! In
                                    rho_ds_zm, rho_ds_zt,            & ! In
+                                   stats_metadata,                  & ! In
                                    stats_zm,                        & ! InOut
                                    up2 )                              ! InOut
       call pos_definite_variances( nz, ngrdcol, gr,                 & ! In
                                    xp2_xpyp_vp2, dt, w_tol_sqd,     & ! In
                                    rho_ds_zm, rho_ds_zt,            & ! In
+                                   stats_metadata,                  & ! In
                                    stats_zm,                        & ! InOut
                                    vp2 )                              ! InOut
     endif
@@ -904,7 +942,8 @@ module advance_xp2_xpyp_module
       !$acc end parallel loop
 
       call clip_variance( nz, ngrdcol, gr, xp2_xpyp_rtp2, dt, threshold_array,  & ! In
-                          stats_zm,                                             & ! intent(inout)
+                          stats_metadata,                                       & ! In  
+                          stats_zm,                                             & ! In/out
                           rtp2 )                                                  ! In/out
     else
 
@@ -918,7 +957,8 @@ module advance_xp2_xpyp_module
       !$acc end parallel loop
 
       call clip_variance( nz, ngrdcol, gr, xp2_xpyp_rtp2, dt, threshold_array,  & ! Intent(in)
-                          stats_zm,                                             & ! intent(inout)
+                          stats_metadata,                                       & ! In  
+                          stats_zm,                                             & ! In/out
                           rtp2 )                                                  ! Intent(inout)
 
     endif ! l_min_xp2_from_corr_wx
@@ -931,22 +971,22 @@ module advance_xp2_xpyp_module
     if ( l_clip_large_rtp2 ) then
     
       ! This overwrites stats clipping data from clip_variance
-      if ( l_stats_samp ) then
+      if ( stats_metadata%l_stats_samp ) then
 
         !$acc update host( rtp2 )
 
         do i = 1, ngrdcol
-          call stat_modify( nz, irtp2_cl, -rtp2(i,:) / dt, & ! intent(in)
+          call stat_modify( nz, stats_metadata%irtp2_cl, -rtp2(i,:) / dt, & ! intent(in)
                             stats_zm(i) )              ! intent(inout)
         end do
       endif
       
-      rtm_zm = zt2zm( nz, ngrdcol, gr, rtm )
+      rtm_zm = zt2zm( nz, ngrdcol, gr, rtm, zero_threshold )
       
       !$acc parallel loop gang vector collapse(2) default(present)
       do k = 1, nz
         do i = 1, ngrdcol
-          threshold = max( rt_tol**2, rtp2_clip_coef * rtm_zm(i,k)**2 )
+          threshold = max( rt_tol**2, clubb_params(i,irtp2_clip_coef) * rtm_zm(i,k)**2 )
           if ( rtp2(i,k) > threshold ) then
             rtp2(i,k) = threshold
           end if
@@ -954,12 +994,12 @@ module advance_xp2_xpyp_module
       end do ! k = 1..nz
       !$acc end parallel loop
 
-      if ( l_stats_samp ) then
+      if ( stats_metadata%l_stats_samp ) then
 
         !$acc update host( rtp2 )
 
         do i = 1, ngrdcol
-          call stat_modify( nz, irtp2_cl, rtp2(i,:) / dt, & ! intent(in)
+          call stat_modify( nz, stats_metadata%irtp2_cl, rtp2(i,:) / dt, & ! intent(in)
                             stats_zm(i) )             ! intent(inout)
         end do
       endif
@@ -1005,7 +1045,8 @@ module advance_xp2_xpyp_module
       !$acc end parallel loop
 
       call clip_variance( nz, ngrdcol, gr, xp2_xpyp_thlp2, dt, threshold_array, & ! In
-                          stats_zm,                                             & ! intent(inout)
+                          stats_metadata,                                       & ! In  
+                          stats_zm,                                             & ! In/out
                           thlp2 )                                                 ! In/out
 
     else
@@ -1020,7 +1061,8 @@ module advance_xp2_xpyp_module
       !$acc end parallel loop
 
       call clip_variance( nz, ngrdcol, gr, xp2_xpyp_thlp2, dt, threshold_array, & ! Intent(in)
-                          stats_zm,                                             & ! intent(inout)
+                          stats_metadata,                                       & ! In  
+                          stats_zm,                                             & ! In/out
                           thlp2 )                                                 ! Intent(inout)
 
     endif ! l_min_xp2_from_corr_wx
@@ -1038,17 +1080,18 @@ module advance_xp2_xpyp_module
     !$acc end parallel loop
 
     call clip_variance( nz, ngrdcol, gr, xp2_xpyp_up2, dt, threshold_array, & ! Intent(in)
-                        stats_zm,                                           & ! intent(inout)
+                        stats_metadata,                                     & ! In  
+                        stats_zm,                                           & ! In/out
                         up2 )                                                 ! Intent(inout)
 
     ! Clip excessively large values of up2
-    if ( l_stats_samp ) then
+    if ( stats_metadata%l_stats_samp ) then
 
       !$acc update host( up2 )
 
       ! Store previous value in order to calculate clipping
       do i = 1, ngrdcol
-        call stat_modify( nz, iup2_cl, -up2(i,:) / dt, &   ! Intent(in)
+        call stat_modify( nz, stats_metadata%iup2_cl, -up2(i,:) / dt, &   ! Intent(in)
                                 stats_zm(i) )             ! Intent(inout)
       end do
     endif
@@ -1061,13 +1104,13 @@ module advance_xp2_xpyp_module
     end do
     !$acc end parallel loop
 
-    if ( l_stats_samp ) then
+    if ( stats_metadata%l_stats_samp ) then
 
       !$acc update host( up2 )
 
       ! Store final value in order to calculate clipping
       do i = 1, ngrdcol
-        call stat_modify( nz, iup2_cl, up2(i,:) / dt, &   ! Intent(in)
+        call stat_modify( nz, stats_metadata%iup2_cl, up2(i,:) / dt, &   ! Intent(in)
                                 stats_zm(i) )             ! Intent(inout)
       end do
     end if
@@ -1084,16 +1127,17 @@ module advance_xp2_xpyp_module
     !$acc end parallel loop
 
     call clip_variance( nz, ngrdcol, gr, xp2_xpyp_vp2, dt, threshold_array, & ! Intent(in)
-                        stats_zm,                                           & ! intent(inout)
+                        stats_metadata,                                     & ! In  
+                        stats_zm,                                           & ! In/out
                         vp2 )                                                 ! Intent(inout)
 
-    if ( l_stats_samp ) then
+    if ( stats_metadata%l_stats_samp ) then
 
       !$acc update host( vp2 )
 
       ! Store previous value in order to calculate clipping
       do i = 1, ngrdcol
-        call stat_modify( nz, ivp2_cl, -vp2(i,:) / dt, &   ! Intent(in)
+        call stat_modify( nz, stats_metadata%ivp2_cl, -vp2(i,:) / dt, &   ! Intent(in)
                           stats_zm(i) )             ! Intent(inout)
       end do
     end if
@@ -1106,13 +1150,13 @@ module advance_xp2_xpyp_module
     end do
     !$acc end parallel loop
 
-    if ( l_stats_samp ) then
+    if ( stats_metadata%l_stats_samp ) then
 
       !$acc update host( vp2 )
 
       ! Store final value in order to calculate clipping
       do i = 1, ngrdcol
-        call stat_modify( nz, ivp2_cl, vp2(i,:) / dt, &   ! Intent(in)
+        call stat_modify( nz, stats_metadata%ivp2_cl, vp2(i,:) / dt, &   ! Intent(in)
                                 stats_zm(i) )             ! Intent(inout)
       end do
     endif
@@ -1122,11 +1166,11 @@ module advance_xp2_xpyp_module
 
       !$acc update host( up2, vp2 )
 
-      if ( l_stats_samp ) then
+      if ( stats_metadata%l_stats_samp ) then
         do i = 1, ngrdcol
-          call stat_begin_update( nz, iup2_sdmp, up2(i,:) / dt, & ! intent(in)
+          call stat_begin_update( nz, stats_metadata%iup2_sdmp, up2(i,:) / dt, & ! intent(in)
                                   stats_zm(i) )             ! intent(inout)
-          call stat_begin_update( nz, ivp2_sdmp, vp2(i,:) / dt, & ! intent(in)
+          call stat_begin_update( nz, stats_metadata%ivp2_sdmp, vp2(i,:) / dt, & ! intent(in)
                                   stats_zm(i) )             ! intent(inout)
         end do
       end if
@@ -1141,11 +1185,11 @@ module advance_xp2_xpyp_module
                                     up2_vp2_sponge_damp_profile )
       end do
 
-      if ( l_stats_samp ) then
+      if ( stats_metadata%l_stats_samp ) then
         do i = 1, ngrdcol
-          call stat_end_update( nz, iup2_sdmp, up2(i,:) / dt, & ! intent(in)
+          call stat_end_update( nz, stats_metadata%iup2_sdmp, up2(i,:) / dt, & ! intent(in)
                                 stats_zm(i) )             ! intent(inout)
-          call stat_end_update( nz, ivp2_sdmp, vp2(i,:) / dt, & ! intent(in)
+          call stat_end_update( nz, stats_metadata%ivp2_sdmp, vp2(i,:) / dt, & ! intent(in)
                                 stats_zm(i) )             ! intent(inout)
         end do
       end if
@@ -1167,6 +1211,7 @@ module advance_xp2_xpyp_module
     call clip_covar( nz, ngrdcol, gr, xp2_xpyp_rtpthlp, l_first_clip_ts,  & ! Intent(in)
                      l_last_clip_ts, dt, rtp2, thlp2,                     & ! Intent(in)
                      l_predict_upwp_vpwp,                                 & ! Intent(in)
+                     stats_metadata,                                      & ! Intent(in)
                      stats_zm,                                            & ! intent(inout)
                      rtpthlp, rtpthlp_chnge )                               ! Intent(inout)
 
@@ -1178,21 +1223,24 @@ module advance_xp2_xpyp_module
           call pos_definite_variances( nz, ngrdcol, gr,                         & ! In
                                        xp2_xpyp_sclrp2, dt, sclr_tol(sclr)**2,  & ! In
                                        rho_ds_zm, rho_ds_zt,                    & ! In
+                                       stats_metadata,                          & ! In
                                        stats_zm,                                & ! InOut
                                        sclrp2(:,:,sclr) )                         ! InOut
-          if ( sclr == iisclr_rt ) then
+          if ( sclr == sclr_idx%iisclr_rt ) then
             ! Here again, we do this kluge here to make sclr'rt' == rt'^2
             call pos_definite_variances( nz, ngrdcol, gr,                           & ! In
                                          xp2_xpyp_sclrprtp, dt, sclr_tol(sclr)**2,  & ! In
                                          rho_ds_zm, rho_ds_zt,                      & ! In
+                                         stats_metadata,                            & ! In
                                          stats_zm,                                  & ! InOut
                                          sclrprtp(:,:,sclr) )                         ! InOut
           end if
-          if ( sclr == iisclr_thl ) then
+          if ( sclr == sclr_idx%iisclr_thl ) then
             ! As with sclr'rt' above, but for sclr'thl'
             call pos_definite_variances( nz, ngrdcol, gr,                           & ! In
                                          xp2_xpyp_sclrpthlp, dt, sclr_tol(sclr)**2, & ! In
                                          rho_ds_zm, rho_ds_zt,                      & ! In
+                                         stats_metadata,                            & ! In
                                          stats_zm,                                  & ! InOut
                                          sclrpthlp(:,:,sclr) )                        ! InOut
           end if
@@ -1212,7 +1260,8 @@ module advance_xp2_xpyp_module
         !$acc end parallel loop
 
         call clip_variance( nz, ngrdcol, gr, clip_sclrp2, dt, threshold_array,  & ! Intent(in)
-                            stats_zm,                                           & ! intent(inout)
+                            stats_metadata,                                     & ! In  
+                            stats_zm,                                           & ! In/out
                             sclrp2(:,:,sclr) )                                    ! Intent(inout)
 
       enddo
@@ -1227,7 +1276,7 @@ module advance_xp2_xpyp_module
       ! same place, clipping for sclr'r_t' only has to be done once.
       do sclr = 1, sclr_dim, 1
 
-        if  ( sclr == iisclr_rt ) then
+        if  ( sclr == sclr_idx%iisclr_rt ) then
           ! Treat this like a variance if we're emulating rt
           !$acc parallel loop gang vector collapse(2) default(present)
           do k = 1, nz, 1
@@ -1238,7 +1287,8 @@ module advance_xp2_xpyp_module
           !$acc end parallel loop
 
           call clip_variance( nz, ngrdcol, gr, clip_sclrprtp, dt, threshold_array, & ! Intent(in)
-                              stats_zm,                                            & ! intent(inout)
+                              stats_metadata,                                      & ! In  
+                              stats_zm,                                            & ! In/out
                               sclrprtp(:,:,sclr) )                                   ! Intent(inout)
         else
           l_first_clip_ts = .true.
@@ -1246,6 +1296,7 @@ module advance_xp2_xpyp_module
           call clip_covar( nz, ngrdcol, gr, clip_sclrprtp, l_first_clip_ts, & ! Intent(in) 
                            l_last_clip_ts, dt, sclrp2(:,:,sclr), rtp2,      & ! Intent(in)
                            l_predict_upwp_vpwp,                             & ! Intent(in)
+                           stats_metadata,                                  & ! Intent(in)
                            stats_zm,                                        & ! intent(inout)
                            sclrprtp(:,:,sclr), sclrprtp_chnge(:,:,sclr) )     ! Intent(inout)
         end if
@@ -1260,7 +1311,7 @@ module advance_xp2_xpyp_module
       ! Since sclr'^2, th_l'^2, and sclr'th_l' are all computed in the
       ! same place, clipping for sclr'th_l' only has to be done once.
       do sclr = 1, sclr_dim, 1
-        if ( sclr == iisclr_thl ) then
+        if ( sclr == sclr_idx%iisclr_thl ) then
           ! As above, but for thl
           !$acc parallel loop gang vector collapse(2) default(present)
           do k = 1, nz, 1
@@ -1270,15 +1321,17 @@ module advance_xp2_xpyp_module
           end do ! k = 1, nz, 1
           !$acc end parallel loop
 
-          call clip_variance( nz, ngrdcol, gr, clip_sclrpthlp, dt, threshold_array,& ! Intent(in)
-                              stats_zm,                                            & ! intent(inout)
-                              sclrpthlp(:,:,sclr) )                                  ! Intent(inout)
+          call clip_variance( nz, ngrdcol, gr, clip_sclrpthlp, dt, threshold_array, & ! Intent(in)
+                              stats_metadata,                                       & ! In  
+                              stats_zm,                                             & ! In/out
+                              sclrpthlp(:,:,sclr) )                                   ! Intent(inout)
         else
           l_first_clip_ts = .true.
           l_last_clip_ts = .true.
           call clip_covar( nz, ngrdcol, gr, clip_sclrpthlp, l_first_clip_ts,  & ! Intent(in) 
                            l_last_clip_ts, dt, sclrp2(:,:,sclr), thlp2,       & ! Intent(in)
                            l_predict_upwp_vpwp,                               & ! Intent(in)
+                           stats_metadata,                                    & ! Intent(in)
                            stats_zm,                                          & ! intent(inout)
                            sclrpthlp(:,:,sclr), sclrpthlp_chnge(:,:,sclr) )     ! Intent(inout)
         end if
@@ -1388,15 +1441,17 @@ module advance_xp2_xpyp_module
   end subroutine advance_xp2_xpyp
   
   !============================================================================================
-  subroutine solve_xp2_xpyp_with_single_lhs( nz, ngrdcol, gr, C2x, invrs_tau_xp2_zm, rtm, thlm, wprtp, &
+  subroutine solve_xp2_xpyp_with_single_lhs( nz, ngrdcol, sclr_dim, sclr_tol, gr, sclr_idx, &
+                                             C2x, invrs_tau_xp2_zm, rtm, thlm, wprtp, &
                                              wpthlp, rtp2_forcing, thlp2_forcing, &
                                              rtpthlp_forcing, sclrm, wpsclrp, &
                                              lhs_ta, lhs_ma, lhs_diff, &
                                              rhs_ta_wprtp2, rhs_ta_wpthlp2, &
                                              rhs_ta_wprtpthlp, rhs_ta_wpsclrp2, &
                                              rhs_ta_wprtpsclrp, rhs_ta_wpthlpsclrp, &
-                                             dt, l_scalar_calc, l_lmm_stepping, l_stats_samp, &
+                                             dt, l_scalar_calc, l_lmm_stepping, &
                                              tridiag_solve_method, & 
+                                             stats_metadata, &
                                              stats_zm, stats_sfc, & 
                                              rtp2, thlp2, rtpthlp, &
                                              sclrp2, sclrprtp, sclrpthlp )
@@ -1423,25 +1478,32 @@ module advance_xp2_xpyp_module
       zero_threshold, &
       gamma_over_implicit_ts, &
       one_half
-    
-    use parameters_model, only: &
-      sclr_dim, & ! Variable(s)
-      sclr_tol
         
     use array_index, only: &
-      iisclr_rt, &
-      iisclr_thl
+      sclr_idx_type
 
-    use stats_type, only: stats ! Type
+    use stats_type, only: &
+      stats ! Type
+
+    use stats_variables, only: &
+      stats_metadata_type
 
     implicit none
       
     ! -------- Input Variables --------
     integer, intent(in) :: &
-      nz, &
-      ngrdcol
+      nz,       & ! Number of vertical levels
+      ngrdcol,  & ! Number of grid columns
+      sclr_dim    ! Number of passive scalars
 
-    type (grid), target, intent(in) :: gr
+    real( kind = core_rknd ), intent(in), dimension(sclr_dim) :: & 
+      sclr_tol          ! Threshold(s) on the passive scalars  [units vary]
+
+    type (grid), target, intent(in) :: &
+      gr
+
+    type (sclr_idx_type), intent(in) :: &
+      sclr_idx
     
     real( kind = core_rknd ), intent(in), dimension(ngrdcol,nz) ::  & 
       C2x,              &
@@ -1456,8 +1518,7 @@ module advance_xp2_xpyp_module
 
     logical, intent(in) :: &
       l_scalar_calc, &
-      l_lmm_stepping, &
-      l_stats_samp
+      l_lmm_stepping
 
     real( kind = core_rknd ), intent(in) :: &
       dt             ! Model timestep                                [s]
@@ -1484,6 +1545,9 @@ module advance_xp2_xpyp_module
 
     integer, intent(in) :: &
       tridiag_solve_method  ! Specifier for method to solve tridiagonal systems
+
+    type (stats_metadata_type), intent(in) :: &
+          stats_metadata
 
     ! -------- In/Out Variables --------
 
@@ -1559,6 +1623,7 @@ module advance_xp2_xpyp_module
                        rtm, rtm, rtp2, rtp2_forcing,        & ! In
                        C2x, invrs_tau_xp2_zm, rt_tol**2,    & ! In
                        lhs_ta, rhs_ta_wprtp2,               & ! In
+                       stats_metadata,                      & ! In
                        stats_zm,                            & ! InOut
                        rhs(:,:,1) )                           ! Out
                        
@@ -1567,6 +1632,7 @@ module advance_xp2_xpyp_module
                        thlm, thlm, thlp2, thlp2_forcing,    & ! In
                        C2x, invrs_tau_xp2_zm, thl_tol**2,   & ! In
                        lhs_ta, rhs_ta_wpthlp2,              & ! In
+                       stats_metadata,                      & ! In
                        stats_zm,                            & ! InOut
                        rhs(:,:,2) )                           ! Out
    
@@ -1575,6 +1641,7 @@ module advance_xp2_xpyp_module
                        rtm, thlm, rtpthlp, rtpthlp_forcing,     & ! In
                        C2x, invrs_tau_xp2_zm, zero_threshold,   & ! In
                        lhs_ta, rhs_ta_wprtpthlp,                & ! In
+                       stats_metadata,                          & ! In
                        stats_zm,                                & ! InOut
                        rhs(:,:,3) )                               ! Out
      
@@ -1598,11 +1665,12 @@ module advance_xp2_xpyp_module
                            sclrp2(:,:,sclr), sclrp2_forcing,          & ! In
                            C2x, invrs_tau_xp2_zm, sclr_tol(sclr)**2,  & ! In
                            lhs_ta, rhs_ta_wpsclrp2(:,:,sclr),         & ! In
+                           stats_metadata,                            & ! In
                            stats_zm,                                  & ! InOut
                            rhs(:,:,3+sclr) )                            ! Out
 
         !!!!!***** sclr'r_t' *****!!!!!
-        if ( sclr == iisclr_rt ) then
+        if ( sclr == sclr_idx%iisclr_rt ) then
           ! In this case we're trying to emulate rt'^2 with sclr'rt', so we
           ! handle this as we would a variance, even though generally speaking
           ! the scalar is not rt
@@ -1633,11 +1701,12 @@ module advance_xp2_xpyp_module
                            sclrprtp_forcing,                          & ! In
                            C2x, invrs_tau_xp2_zm, threshold,          & ! In
                            lhs_ta, rhs_ta_wprtpsclrp(:,:,sclr),       & ! In
+                           stats_metadata,                            & ! In
                            stats_zm,                                  & ! InOut
                            rhs(:,:,3+sclr+sclr_dim) )                   ! Out
 
         !!!!!***** sclr'th_l' *****!!!!!
-        if ( sclr == iisclr_thl ) then
+        if ( sclr == sclr_idx%iisclr_thl ) then
           ! In this case we're trying to emulate thl'^2 with sclr'thl', so we
           ! handle this as we did with sclr_rt, above.
           !$acc parallel loop gang vector collapse(2) default(present)
@@ -1667,6 +1736,7 @@ module advance_xp2_xpyp_module
                            sclrpthlp_forcing,                           & ! In
                            C2x, invrs_tau_xp2_zm, threshold,            & ! In
                            lhs_ta, rhs_ta_wpthlpsclrp(:,:,sclr),        & ! In
+                           stats_metadata,                              & ! In
                            stats_zm,                                    & ! InOut
                            rhs(:,:,3+sclr+2*sclr_dim) )                   ! Out
 
@@ -1677,6 +1747,7 @@ module advance_xp2_xpyp_module
     ! Solve multiple rhs with single lhs
     call xp2_xpyp_solve( nz, ngrdcol, xp2_xpyp_single_lhs, 3+3*sclr_dim,  & ! Intent(in)
                          tridiag_solve_method,                            & ! Intent(in)
+                         stats_metadata,                                  & ! Intent(in)
                          stats_sfc,                                       & ! intent(inout)
                          rhs, lhs, solution )                               ! Intent(inout)
                           
@@ -1737,7 +1808,7 @@ module advance_xp2_xpyp_module
       
     endif ! l_lmm_stepping
 
-    if ( l_stats_samp ) then
+    if ( stats_metadata%l_stats_samp ) then
 
       !$acc update host( rtp2, thlp2, rtpthlp, lhs_dp1, lhs_diff, &
       !$acc              lhs_ta, lhs_ma )
@@ -1748,14 +1819,17 @@ module advance_xp2_xpyp_module
         call xp2_xpyp_implicit_stats( nz, xp2_xpyp_rtp2, rtp2(i,:), & !intent(in)
                                       lhs_dp1(i,:), zeros(:), &
                                       lhs_diff(:,i,:), lhs_ta(:,i,:), lhs_ma(:,i,:), &
+                                      stats_metadata, & 
                                       stats_zm(i) ) ! intent(inout)
         call xp2_xpyp_implicit_stats( nz, xp2_xpyp_thlp2, thlp2(i,:), & !intent(in)
                                       lhs_dp1(i,:), zeros(:), &
                                       lhs_diff(:,i,:), lhs_ta(:,i,:), lhs_ma(:,i,:), &
+                                      stats_metadata, & 
                                       stats_zm(i) ) ! intent(inout)
         call xp2_xpyp_implicit_stats( nz, xp2_xpyp_rtpthlp, rtpthlp(i,:), & !intent(in)
                                       lhs_dp1(i,:), zeros(:), &
                                       lhs_diff(:,i,:), lhs_ta(:,i,:), lhs_ma(:,i,:), &
+                                      stats_metadata, & 
                                       stats_zm(i) ) ! intent(inout)
       end do
     end if
@@ -1770,7 +1844,7 @@ module advance_xp2_xpyp_module
   end subroutine solve_xp2_xpyp_with_single_lhs
   
   !============================================================================================
-  subroutine solve_xp2_xpyp_with_multiple_lhs( nz, ngrdcol, gr, &
+  subroutine solve_xp2_xpyp_with_multiple_lhs( nz, ngrdcol, sclr_dim, sclr_tol, gr, sclr_idx, &
                                                C2rt_1d, C2thl_1d, C2rtthl_1d, C2sclr_1d, &
                                                invrs_tau_xp2_zm, rtm, thlm, wprtp, wpthlp, &
                                                rtp2_forcing, thlp2_forcing, rtpthlp_forcing, &
@@ -1782,8 +1856,9 @@ module advance_xp2_xpyp_module
                                                rhs_ta_wprtp2, rhs_ta_wpthlp2, rhs_ta_wprtpthlp, &
                                                rhs_ta_wpsclrp2, rhs_ta_wprtpsclrp, rhs_ta_wpthlpsclrp, &
                                                dt, iiPDF_type, l_scalar_calc, &
-                                               l_lmm_stepping, l_stats_samp, &
+                                               l_lmm_stepping, &
                                                tridiag_solve_method, &
+                                               stats_metadata, &
                                                stats_zm, stats_sfc, & 
                                                rtp2, thlp2, rtpthlp, &
                                                sclrp2, sclrprtp, sclrpthlp )
@@ -1805,28 +1880,35 @@ module advance_xp2_xpyp_module
         zero_threshold, &
         gamma_over_implicit_ts, &
         one_half
-      
-    use parameters_model, only: &
-        sclr_dim, & ! Variable(s)
-        sclr_tol
 
     use model_flags, only: &
         iiPDF_ADG1    ! Variable(s)
           
     use array_index, only: &
-        iisclr_rt, &
-        iisclr_thl
+        sclr_idx_type
 
-    use stats_type, only: stats ! Type
+    use stats_type, only: &
+        stats ! Type
+
+    use stats_variables, only: &
+        stats_metadata_type
 
     implicit none
       
     !------------------------ Input Variables ------------------------
     integer, intent(in) :: &
-      nz, &
-      ngrdcol
+      nz,       & ! Number of vertical levels
+      ngrdcol,  & ! Number of grid columns
+      sclr_dim    ! Number of passive scalars
 
-    type (grid), target, intent(in) :: gr
+    real( kind = core_rknd ), intent(in), dimension(sclr_dim) :: & 
+      sclr_tol          ! Threshold(s) on the passive scalars  [units vary]
+
+    type (grid), target, intent(in) :: &
+      gr
+
+    type (sclr_idx_type), intent(in) :: &
+      sclr_idx
       
     real( kind = core_rknd ), intent(in), dimension(ngrdcol,nz) ::  & 
       C2rt_1d, C2thl_1d, C2rtthl_1d, C2sclr_1d, &
@@ -1847,8 +1929,7 @@ module advance_xp2_xpyp_module
 
     logical, intent(in) :: &
       l_scalar_calc, &
-      l_lmm_stepping, &
-      l_stats_samp
+      l_lmm_stepping
 
     real( kind = core_rknd ), intent(in) :: &
       dt             ! Model timestep                                [s]
@@ -1882,6 +1963,9 @@ module advance_xp2_xpyp_module
       
     integer, intent(in) :: &
       tridiag_solve_method  ! Specifier for method to solve tridiagonal systems
+
+    type (stats_metadata_type), intent(in) :: &
+      stats_metadata
 
     !------------------------ In/Out Variables ------------------------
     
@@ -1971,12 +2055,14 @@ module advance_xp2_xpyp_module
                        rtm, rtm, rtp2, rtp2_forcing, & ! In
                        C2rt_1d, invrs_tau_xp2_zm, rt_tol**2, & ! In
                        lhs_ta_wprtp2, rhs_ta_wprtp2, & ! In
+                       stats_metadata, & ! In
                        stats_zm, & ! intent(inout)
                        rhs ) ! Out
                            
     ! Solve the tridiagonal system
     call xp2_xpyp_solve( nz, ngrdcol, xp2_xpyp_rtp2, 1, & ! Intent(in)
                          tridiag_solve_method,          & ! Intent(in)
+                         stats_metadata,                & ! Intent(in)
                          stats_sfc,                     & ! intent(inout)
                          rhs, lhs, rtp2_solution )        ! Intent(inout)
                            
@@ -1998,7 +2084,7 @@ module advance_xp2_xpyp_module
       !$acc end parallel loop
     endif ! l_lmm_stepping
    
-    if ( l_stats_samp ) then
+    if ( stats_metadata%l_stats_samp ) then
 
       !$acc update host( rtp2, lhs_dp1, lhs_diff, lhs_ta_wprtp2, lhs_ma )
 
@@ -2007,6 +2093,7 @@ module advance_xp2_xpyp_module
         call xp2_xpyp_implicit_stats( nz, xp2_xpyp_rtp2, rtp2(i,:), & !intent(in)
                                       lhs_dp1(i,:), zeros(i,:), &
                                       lhs_diff(:,i,:), lhs_ta_wprtp2(:,i,:), lhs_ma(:,i,:), &
+                                      stats_metadata, & 
                                       stats_zm(i) ) ! intent(inout)
       end do
     end if
@@ -2035,12 +2122,14 @@ module advance_xp2_xpyp_module
                        thlm, thlm, thlp2, thlp2_forcing, & ! In
                        C2thl_1d, invrs_tau_xp2_zm, thl_tol**2, & ! In
                        lhs_ta_wpthlp2, rhs_ta_wpthlp2, & ! In
+                       stats_metadata, & ! In
                        stats_zm, & ! intent(inout)
                        rhs ) ! Out
 
     ! Solve the tridiagonal system
     call xp2_xpyp_solve( nz, ngrdcol, xp2_xpyp_thlp2, 1,  & ! Intent(in)
                          tridiag_solve_method,            & ! Intent(in)
+                         stats_metadata,                  & ! Intent(in)
                          stats_sfc,                       & ! intent(inout)
                          rhs, lhs, thlp2_solution )         ! Intent(inout)
                            
@@ -2062,7 +2151,7 @@ module advance_xp2_xpyp_module
       !$acc end parallel loop
     endif ! l_lmm_stepping
    
-    if ( l_stats_samp ) then
+    if ( stats_metadata%l_stats_samp ) then
 
       !$acc update host( thlp2, lhs_dp1, lhs_diff, lhs_ta_wpthlp2, lhs_ma )
 
@@ -2070,6 +2159,7 @@ module advance_xp2_xpyp_module
         call xp2_xpyp_implicit_stats( nz, xp2_xpyp_thlp2, thlp2(i,:), & !intent(in)
                                       lhs_dp1(i,:), zeros(i,:), &
                                       lhs_diff(:,i,:), lhs_ta_wpthlp2(:,i,:), lhs_ma(:,i,:), &
+                                      stats_metadata, & 
                                       stats_zm(i) ) ! intent(inout)
       end do
     end if
@@ -2098,12 +2188,14 @@ module advance_xp2_xpyp_module
                        rtm, thlm, rtpthlp, rtpthlp_forcing, & ! In
                        C2rtthl_1d, invrs_tau_xp2_zm, zero_threshold, & ! In
                        lhs_ta_wprtpthlp, rhs_ta_wprtpthlp, & ! In
+                       stats_metadata, & ! In
                        stats_zm, & ! intent(inout)
                        rhs ) ! Out
 
     ! Solve the tridiagonal system
     call xp2_xpyp_solve( nz, ngrdcol, xp2_xpyp_rtpthlp, 1,  & ! Intent(in)
                          tridiag_solve_method,              & ! Intent(in)
+                         stats_metadata,                    & ! Intent(in)
                          stats_sfc,                         & ! intent(inout)
                          rhs, lhs, rtpthlp_solution )         ! Intent(inout)
                            
@@ -2125,7 +2217,7 @@ module advance_xp2_xpyp_module
       !$acc end parallel loop
     endif ! l_lmm_stepping
    
-    if ( l_stats_samp ) then
+    if ( stats_metadata%l_stats_samp ) then
 
       !$acc update host( rtpthlp, lhs_dp1, lhs_diff, lhs_ta_wprtpthlp, lhs_ma )
 
@@ -2133,6 +2225,7 @@ module advance_xp2_xpyp_module
         call xp2_xpyp_implicit_stats( nz, xp2_xpyp_rtpthlp, rtpthlp(i,:), & !intent(in)
                                       lhs_dp1(i,:), zeros(i,:), &
                                       lhs_diff(:,i,:), lhs_ta_wprtpthlp(:,i,:), lhs_ma(:,i,:), &
+                                      stats_metadata, & 
                                       stats_zm(i) ) ! intent(inout)
       end do
     end if
@@ -2171,12 +2264,14 @@ module advance_xp2_xpyp_module
                              sclrp2(:,:,sclr), sclrp2_forcing(:,:), & ! In
                              C2sclr_1d, invrs_tau_xp2_zm(:,:), sclr_tol(sclr)**2, & ! In
                              lhs_ta_wpsclrp2(:,:,:,sclr), rhs_ta_wpsclrp2(:,:,sclr), & ! In
+                             stats_metadata, & ! In
                              stats_zm, & ! intent(inout)
                              rhs ) ! Out
 
           ! Solve the tridiagonal system
           call xp2_xpyp_solve( nz, ngrdcol, xp2_xpyp_scalars, 1,      & ! Intent(in)
                                tridiag_solve_method,                  & ! Intent(in)
+                               stats_metadata,                        & ! Intent(in)
                                stats_sfc,                             & ! intent(inout)
                                rhs, lhs, sclrp2_solution(:,:,sclr) )    ! Intent(inout)
                                
@@ -2187,7 +2282,7 @@ module advance_xp2_xpyp_module
           endif ! l_lmm_stepping
       
           !!!!!***** sclr'r_t' *****!!!!!
-          if ( sclr == iisclr_rt ) then
+          if ( sclr == sclr_idx%iisclr_rt ) then
              ! In this case we're trying to emulate rt'^2 with sclr'rt', so we
              ! handle this as we would a variance, even though generally speaking
              ! the scalar is not rt
@@ -2208,12 +2303,14 @@ module advance_xp2_xpyp_module
                              sclrprtp_forcing, & ! In
                              C2sclr_1d, invrs_tau_xp2_zm, threshold, & ! In
                              lhs_ta_wprtpsclrp(:,:,:,sclr), rhs_ta_wprtpsclrp(:,:,sclr), & ! In
+                             stats_metadata, & ! In
                              stats_zm, & ! intent(inout)
                              rhs ) ! Out
 
           ! Solve the tridiagonal system
           call xp2_xpyp_solve( nz, ngrdcol, xp2_xpyp_scalars, 1,        & ! Intent(in)
                                tridiag_solve_method,                    & ! Intent(in)
+                               stats_metadata,                          & ! Intent(in)
                                stats_sfc,                               & ! intent(inout)
                                rhs, lhs, sclrprtp_solution(:,:,sclr) )    ! Intent(inout)
                                
@@ -2225,7 +2322,7 @@ module advance_xp2_xpyp_module
       
           !!!!!***** sclr'th_l' *****!!!!!
 
-          if ( sclr == iisclr_thl ) then
+          if ( sclr == sclr_idx%iisclr_thl ) then
             ! In this case we're trying to emulate thl'^2 with sclr'thl', so we
             ! handle this as we did with sclr_rt, above.
             sclrpthlp_forcing(:,:) = thlp2_forcing(:,:)
@@ -2245,12 +2342,14 @@ module advance_xp2_xpyp_module
                              sclrpthlp_forcing, & ! In
                              C2sclr_1d, invrs_tau_xp2_zm, threshold, & ! In
                              lhs_ta_wpthlpsclrp(:,:,:,sclr), rhs_ta_wpthlpsclrp(:,:,sclr), & ! In
+                             stats_metadata, & ! In
                              stats_zm, & ! intent(inout)
                              rhs ) ! Out
 
           ! Solve the tridiagonal system
           call xp2_xpyp_solve( nz, ngrdcol, xp2_xpyp_scalars, 1,        & ! Intent(in)
                                tridiag_solve_method,                    & ! Intent(in)
+                               stats_metadata,                          & ! Intent(in)
                                stats_sfc,                               & ! intent(inout)
                                rhs, lhs, sclrpthlp_solution(:,:,sclr) )   ! Intent(inout)
                                
@@ -2295,11 +2394,12 @@ module advance_xp2_xpyp_module
                              sclrp2(:,:,sclr), sclrp2_forcing, & ! In
                              C2sclr_1d, invrs_tau_xp2_zm, sclr_tol(sclr)**2, & ! In
                              lhs_ta_wpsclrp2(:,:,:,1), rhs_ta_wpsclrp2(:,:,sclr), & ! In
+                             stats_metadata, & ! In
                              stats_zm, & ! intent(inout)
                              sclr_rhs(:,:,sclr) ) ! Out
 
           !!!!!***** sclr'r_t' *****!!!!!
-          if ( sclr == iisclr_rt ) then
+          if ( sclr == sclr_idx%iisclr_rt ) then
             ! In this case we're trying to emulate rt'^2 with sclr'rt', so we
             ! handle this as we would a variance, even though generally speaking
             ! the scalar is not rt
@@ -2330,12 +2430,13 @@ module advance_xp2_xpyp_module
                              sclrprtp_forcing, & ! In
                              C2sclr_1d, invrs_tau_xp2_zm, threshold, & ! In
                              lhs_ta_wpsclrp2(:,:,:,1), rhs_ta_wprtpsclrp(:,:,sclr), & ! In
+                             stats_metadata, & ! In
                              stats_zm, & ! intent(inout)
                              sclr_rhs(:,:,sclr+sclr_dim) ) ! Out
 
           !!!!!***** sclr'th_l' *****!!!!!
 
-          if ( sclr == iisclr_thl ) then
+          if ( sclr == sclr_idx%iisclr_thl ) then
             ! In this case we're trying to emulate thl'^2 with sclr'thl', so we
             ! handle this as we did with sclr_rt, above.
             !$acc parallel loop gang vector collapse(2) default(present)
@@ -2365,6 +2466,7 @@ module advance_xp2_xpyp_module
                              sclrpthlp_forcing, & ! In
                              C2sclr_1d, invrs_tau_xp2_zm, threshold, & ! In
                              lhs_ta_wpsclrp2(:,:,:,1), rhs_ta_wpthlpsclrp(:,:,sclr), & ! In
+                             stats_metadata, & ! In
                              stats_zm, & ! intent(inout)
                              sclr_rhs(:,:,sclr+2*sclr_dim) ) ! Out
 
@@ -2372,7 +2474,8 @@ module advance_xp2_xpyp_module
 
         ! Solve the tridiagonal system
         call xp2_xpyp_solve( nz, ngrdcol, xp2_xpyp_scalars, 3*sclr_dim, & ! Intent(in)
-                            tridiag_solve_method,                       & ! Intent(in)
+                             tridiag_solve_method,                      & ! Intent(in)
+                             stats_metadata,                            & ! Intent(in)
                              stats_sfc,                                 & ! intent(inout)
                              sclr_rhs, lhs, sclr_solution )               ! Intent(inout)
         
@@ -2468,28 +2571,6 @@ module advance_xp2_xpyp_module
     use advance_helper_module, only: &
         set_boundary_conditions_lhs    ! Procedure(s)
 
-    
-    use stats_variables, only: &
-        l_stats_samp, &
-        irtp2_ma, &
-        irtp2_ta, &
-        irtp2_dp1, &
-        irtp2_dp2, &
-        ithlp2_ma, &
-        ithlp2_ta, &
-        ithlp2_dp1, &
-        ithlp2_dp2, &
-        irtpthlp_ma, &
-        irtpthlp_ta, &
-        irtpthlp_dp1, &
-        irtpthlp_dp2, &
-        iup2_ma, &
-        iup2_ta, &
-        iup2_dp2, &
-        ivp2_ma, &
-        ivp2_ta, &
-        ivp2_dp2
-
     implicit none
 
     !------------------- Input Variables -------------------
@@ -2571,6 +2652,7 @@ module advance_xp2_xpyp_module
   !=============================================================================
   subroutine xp2_xpyp_solve( nz, ngrdcol, solve_type, nrhs, &
                              tridiag_solve_method, & 
+                             stats_metadata, &
                              stats_sfc, &
                              rhs, lhs, xapxbp )
 
@@ -2594,11 +2676,7 @@ module advance_xp2_xpyp_module
         stat_update_var_pt  ! Procedure(s)
 
     use stats_variables, only: & 
-        irtp2_matrix_condt_num, & ! Stat index Variables
-        ithlp2_matrix_condt_num, & 
-        irtpthlp_matrix_condt_num, & 
-        iup2_vp2_matrix_condt_num, & 
-        l_stats_samp  ! Logical
+        stats_metadata_type
 
     use clubb_precision, only: &
         core_rknd ! Variable(s)
@@ -2629,6 +2707,9 @@ module advance_xp2_xpyp_module
 
     integer, intent(in) :: &
       tridiag_solve_method  ! Specifier for method to solve tridiagonal systems
+
+    type (stats_metadata_type), intent(in) :: &
+      stats_metadata
 
     ! ---------------------- Input/Ouput variables ----------------------
     type (stats), target, dimension(ngrdcol), intent(inout) :: &
@@ -2665,22 +2746,22 @@ module advance_xp2_xpyp_module
       ! Note that these are diagnostics from inverting the matrix, not a budget
       !------------------------------------------------------------------------
     case ( xp2_xpyp_rtp2 )
-      ixapxbp_matrix_condt_num  = irtp2_matrix_condt_num
+      ixapxbp_matrix_condt_num  = stats_metadata%irtp2_matrix_condt_num
       solve_type_str = "rtp2"
     case ( xp2_xpyp_thlp2 )
-      ixapxbp_matrix_condt_num  = ithlp2_matrix_condt_num
+      ixapxbp_matrix_condt_num  = stats_metadata%ithlp2_matrix_condt_num
       solve_type_str = "thlp2"
     case ( xp2_xpyp_rtpthlp )
-      ixapxbp_matrix_condt_num  = irtpthlp_matrix_condt_num
+      ixapxbp_matrix_condt_num  = stats_metadata%irtpthlp_matrix_condt_num
       solve_type_str = "rtpthlp"
     case ( xp2_xpyp_up2_vp2 )
-      ixapxbp_matrix_condt_num  = iup2_vp2_matrix_condt_num
+      ixapxbp_matrix_condt_num  = stats_metadata%iup2_vp2_matrix_condt_num
       solve_type_str = "up2_vp2"
     case ( xp2_xpyp_single_lhs )
       ! In single solve tpype, condition number is either output for none or all 
       ! rtp2, thlp2, and rtpthlp together
-      ixapxbp_matrix_condt_num = max( irtp2_matrix_condt_num, ithlp2_matrix_condt_num, &
-                                      irtpthlp_matrix_condt_num )
+      ixapxbp_matrix_condt_num = max( stats_metadata%irtp2_matrix_condt_num, stats_metadata%ithlp2_matrix_condt_num, &
+                                      stats_metadata%irtpthlp_matrix_condt_num )
       l_single_lhs_solve = .true.
       solve_type_str = "xp2_xpyp_single_lhs"
     case default
@@ -2689,7 +2770,7 @@ module advance_xp2_xpyp_module
       solve_type_str = "scalar"
     end select
 
-    if ( l_stats_samp .and. ixapxbp_matrix_condt_num > 0 ) then
+    if ( stats_metadata%l_stats_samp .and. ixapxbp_matrix_condt_num > 0 ) then
       
       call tridiag_solve( solve_type_str, tridiag_solve_method, & ! Intent(in) 
                           ngrdcol, nz, nrhs,                    & ! Intent(in) 
@@ -2699,13 +2780,13 @@ module advance_xp2_xpyp_module
       if ( l_single_lhs_solve ) then
         do i = 1, ngrdcol
           ! Single lhs solve including rtp2, thlp2, rtpthlp. Estimate for each.
-          call stat_update_var_pt( irtp2_matrix_condt_num, 1, one / rcond(i), &  ! Intent(in)
+          call stat_update_var_pt( stats_metadata%irtp2_matrix_condt_num, 1, one / rcond(i), &  ! Intent(in)
                                    stats_sfc(i) )                                ! Intent(inout)
                                    
-          call stat_update_var_pt( ithlp2_matrix_condt_num, 1, one / rcond(i), &  ! Intent(in)
+          call stat_update_var_pt( stats_metadata%ithlp2_matrix_condt_num, 1, one / rcond(i), &  ! Intent(in)
                                    stats_sfc(i) )                                 ! Intent(inout)
                                    
-          call stat_update_var_pt( irtpthlp_matrix_condt_num, 1, one / rcond(i), & ! Intent(in)
+          call stat_update_var_pt( stats_metadata%irtpthlp_matrix_condt_num, 1, one / rcond(i), & ! Intent(in)
                                    stats_sfc(i) )                                  ! Intent(inout)
         end do
       else
@@ -2733,6 +2814,7 @@ module advance_xp2_xpyp_module
   subroutine xp2_xpyp_implicit_stats( nz, solve_type, xapxbp, & !intent(in)
                                       lhs_dp1_C14, lhs_dp1_C4, &
                                       lhs_diff, lhs_ta, lhs_ma, &
+                                      stats_metadata, &
                                       stats_zm ) ! intent(inout)
 
     ! Description:
@@ -2747,49 +2829,21 @@ module advance_xp2_xpyp_module
         stat_end_update_pt, & ! Procedure(s)
         stat_update_var_pt
 
-    use stats_variables, only: &
-        irtp2_dp1, &
-        irtp2_dp2, &
-        irtp2_ta, &
-        irtp2_ma, &
-        ithlp2_dp1, &
-        ithlp2_dp2, &
-        ithlp2_ta, &
-        ithlp2_ma, &
-        irtpthlp_dp1, &
-        irtpthlp_dp2, &
-        irtpthlp_ta, &
-        irtpthlp_ma, &
-        iup2_dp1, &
-        iup2_dp2, &
-        iup2_ta, &
-        iup2_ma, &
-        iup2_pr1, &
-        ivp2_dp1
-
-    use stats_variables, only: &
-        ivp2_dp2, &
-        ivp2_ta, &
-        ivp2_ma, &
-        ivp2_pr1
-
     use clubb_precision, only: &
         core_rknd ! Variable(s)
         
     use constants_clubb, only: &
         gamma_over_implicit_ts
 
-    use stats_type, only: stats ! Type
+    use stats_type, only: &
+        stats ! Type
+
+    use stats_variables, only: &
+        stats_metadata_type
 
     implicit none
 
-    type (stats), target, intent(inout) :: &
-      stats_zm
-
-    ! External
-    intrinsic :: max, min, trim
-
-    ! Input variables
+    !----------------------- Input variables -----------------------
     integer, intent(in) :: &
       nz
     
@@ -2810,7 +2864,14 @@ module advance_xp2_xpyp_module
       lhs_diff, & ! Diffusion contributions to lhs, dissipation term 2
       lhs_ma      ! Mean advection contributions to lhs
 
-    ! Local variables
+    type (stats_metadata_type), intent(in) :: &
+      stats_metadata
+
+    !----------------------- InOut variables -----------------------
+    type (stats), target, intent(inout) :: &
+      stats_zm
+
+    !----------------------- Local Variables -----------------------
     integer :: k, kp1, km1 ! Array indices
 
     ! Budget indices
@@ -2821,43 +2882,43 @@ module advance_xp2_xpyp_module
       ixapxbp_ma, & 
       ixapxbp_pr1
 
-    ! --- Begin Code ---
+    !-----------------------Begin Code -----------------------
 
     select case ( solve_type )
     case ( xp2_xpyp_rtp2 )
-      ixapxbp_dp1 = irtp2_dp1
-      ixapxbp_dp2 = irtp2_dp2
-      ixapxbp_ta  = irtp2_ta
-      ixapxbp_ma  = irtp2_ma
+      ixapxbp_dp1 = stats_metadata%irtp2_dp1
+      ixapxbp_dp2 = stats_metadata%irtp2_dp2
+      ixapxbp_ta  = stats_metadata%irtp2_ta
+      ixapxbp_ma  = stats_metadata%irtp2_ma
       ixapxbp_pr1 = 0
 
     case ( xp2_xpyp_thlp2 )
-      ixapxbp_dp1 = ithlp2_dp1
-      ixapxbp_dp2 = ithlp2_dp2
-      ixapxbp_ta  = ithlp2_ta
-      ixapxbp_ma  = ithlp2_ma
+      ixapxbp_dp1 = stats_metadata%ithlp2_dp1
+      ixapxbp_dp2 = stats_metadata%ithlp2_dp2
+      ixapxbp_ta  = stats_metadata%ithlp2_ta
+      ixapxbp_ma  = stats_metadata%ithlp2_ma
       ixapxbp_pr1 = 0
 
     case ( xp2_xpyp_rtpthlp )
-      ixapxbp_dp1 = irtpthlp_dp1
-      ixapxbp_dp2 = irtpthlp_dp2
-      ixapxbp_ta  = irtpthlp_ta
-      ixapxbp_ma  = irtpthlp_ma
+      ixapxbp_dp1 = stats_metadata%irtpthlp_dp1
+      ixapxbp_dp2 = stats_metadata%irtpthlp_dp2
+      ixapxbp_ta  = stats_metadata%irtpthlp_ta
+      ixapxbp_ma  = stats_metadata%irtpthlp_ma
       ixapxbp_pr1 = 0
 
     case ( xp2_xpyp_up2 )
-      ixapxbp_dp1 = iup2_dp1
-      ixapxbp_dp2 = iup2_dp2
-      ixapxbp_ta  = iup2_ta
-      ixapxbp_ma  = iup2_ma
-      ixapxbp_pr1 = iup2_pr1
+      ixapxbp_dp1 = stats_metadata%iup2_dp1
+      ixapxbp_dp2 = stats_metadata%iup2_dp2
+      ixapxbp_ta  = stats_metadata%iup2_ta
+      ixapxbp_ma  = stats_metadata%iup2_ma
+      ixapxbp_pr1 = stats_metadata%iup2_pr1
 
     case ( xp2_xpyp_vp2 )
-      ixapxbp_dp1 = ivp2_dp1
-      ixapxbp_dp2 = ivp2_dp2
-      ixapxbp_ta  = ivp2_ta
-      ixapxbp_ma  = ivp2_ma
-      ixapxbp_pr1 = ivp2_pr1
+      ixapxbp_dp1 = stats_metadata%ivp2_dp1
+      ixapxbp_dp2 = stats_metadata%ivp2_dp2
+      ixapxbp_ta  = stats_metadata%ivp2_ta
+      ixapxbp_ma  = stats_metadata%ivp2_ma
+      ixapxbp_pr1 = stats_metadata%ivp2_pr1
 
     case default ! No budgets are setup for the passive scalars
       ixapxbp_dp1 = 0
@@ -2918,9 +2979,10 @@ module advance_xp2_xpyp_module
                               C4_1d, invrs_tau_C4_zm, C14_1d, invrs_tau_C14_zm, & ! In
                               xam, xbm, wpxap, wpxbp, xap2, xbp2, & ! In
                               thv_ds_zm, C4, C_uu_shr, C_uu_buoy, C14, lhs_splat_wp2, & ! In
-                              lhs_ta, rhs_ta, &
-                              lhs_dp1_C4, lhs_dp1_C14, &
-                              stats_zm, & ! intent(inout)
+                              lhs_ta, rhs_ta, & ! In
+                              lhs_dp1_C4, lhs_dp1_C14, & ! In
+                              stats_metadata, & ! In
+                              stats_zm, & ! InOut
                               rhs ) ! Out
 
   ! Description:
@@ -2968,19 +3030,7 @@ module advance_xp2_xpyp_module
         stat_modify_pt
 
     use stats_variables, only: & 
-        ivp2_ta,  & ! Variable(s)
-        ivp2_tp, & 
-        ivp2_dp1, & 
-        ivp2_pr1, & 
-        ivp2_pr2, & 
-        ivp2_splat, & 
-        iup2_ta, & 
-        iup2_tp, & 
-        iup2_dp1, & 
-        iup2_pr1, & 
-        iup2_pr2, & 
-        iup2_splat, & 
-        l_stats_samp
+        stats_metadata_type
 
     use stats_type, only: stats ! Type
 
@@ -3003,7 +3053,7 @@ module advance_xp2_xpyp_module
     ! increase numerical stability.  A weighted factor must then be applied to
     ! the RHS in order to balance the weight.
     real( kind = core_rknd ), dimension(ndiags3,ngrdcol,nz), intent(in) :: & 
-     lhs_ta     ! LHS turbulent advection term
+      lhs_ta     ! LHS turbulent advection term
 
     real( kind = core_rknd ), dimension(ngrdcol,nz), intent(in) :: & 
       rhs_ta,           & ! RHS turbulent advection terms
@@ -3023,15 +3073,17 @@ module advance_xp2_xpyp_module
       lhs_splat_wp2       ! LHS coefficient of wp2 splatting term           [1/s]
 
     real( kind = core_rknd ), dimension(ngrdcol,nz), intent(in) :: & 
-       lhs_dp1_C4,  & ! LHS dissipation term 1, for up2 vp2 using C14
-       lhs_dp1_C14    ! LHS dissipation term 1, for up2 vp2 using C4
+      lhs_dp1_C4,  & ! LHS dissipation term 1, for up2 vp2 using C14
+      lhs_dp1_C14    ! LHS dissipation term 1, for up2 vp2 using C4
 
-    real( kind = core_rknd ), intent(in) :: & 
+    real( kind = core_rknd ), dimension(ngrdcol), intent(in) :: & 
       C4,        & ! Model parameter C_4                         [-]
       C_uu_shr,  & ! Model parameter C_uu_shr                    [-]
       C_uu_buoy, & ! Model parameter C_uu_buoy                   [-]
       C14          ! Model parameter C_{14}                      [-]
 
+    type (stats_metadata_type), intent(in) :: &
+      stats_metadata
 
     !------------------- InOut Variables -------------------
     type (stats), target, dimension(ngrdcol), intent(inout) :: &
@@ -3070,25 +3122,28 @@ module advance_xp2_xpyp_module
     real( kind = core_rknd ), dimension(ngrdcol,nz) :: & 
       rhs_term_tp
 
+    real( kind = core_rknd ), dimension(ngrdcol) :: & 
+      zeros_vector
+
     !----------------------------- Begin Code ----------------------------------
 
     !$acc enter data create( rhs_pr1, rhs_pr2, rhs_term_tp )
 
     select case ( solve_type )
     case ( xp2_xpyp_vp2 )
-      ixapxbp_ta  = ivp2_ta
-      ixapxbp_tp  = ivp2_tp
-      ixapxbp_dp1 = ivp2_dp1
-      ixapxbp_pr1 = ivp2_pr1
-      ixapxbp_pr2 = ivp2_pr2
-      ixapxbp_splat = ivp2_splat
+      ixapxbp_ta  = stats_metadata%ivp2_ta
+      ixapxbp_tp  = stats_metadata%ivp2_tp
+      ixapxbp_dp1 = stats_metadata%ivp2_dp1
+      ixapxbp_pr1 = stats_metadata%ivp2_pr1
+      ixapxbp_pr2 = stats_metadata%ivp2_pr2
+      ixapxbp_splat = stats_metadata%ivp2_splat
     case ( xp2_xpyp_up2 )
-      ixapxbp_ta  = iup2_ta
-      ixapxbp_tp  = iup2_tp
-      ixapxbp_dp1 = iup2_dp1
-      ixapxbp_pr1 = iup2_pr1
-      ixapxbp_pr2 = iup2_pr2
-      ixapxbp_splat = iup2_splat
+      ixapxbp_ta  = stats_metadata%iup2_ta
+      ixapxbp_tp  = stats_metadata%iup2_tp
+      ixapxbp_dp1 = stats_metadata%iup2_dp1
+      ixapxbp_pr1 = stats_metadata%iup2_pr1
+      ixapxbp_pr2 = stats_metadata%iup2_pr2
+      ixapxbp_splat = stats_metadata%iup2_splat
     case default ! No budgets for passive scalars
       ixapxbp_ta  = 0
       ixapxbp_tp  = 0
@@ -3138,7 +3193,7 @@ module advance_xp2_xpyp_module
 
         ! RHS turbulent production (tp) term.
         ! https://arxiv.org/pdf/1711.03675v1.pdf#nameddest=url:up2_pr 
-        rhs(i,k) = rhs(i,k) + ( one - C_uu_shr ) * rhs_term_tp(i,k)
+        rhs(i,k) = rhs(i,k) + ( one - C_uu_shr(i) ) * rhs_term_tp(i,k)
 
         ! RHS pressure term 1 (pr1) (and dissipation term 1 (dp1)).
         rhs(i,k) = rhs(i,k) + rhs_pr1(i,k)
@@ -3164,7 +3219,7 @@ module advance_xp2_xpyp_module
     end do
 
     !$acc end parallel loop
-    if ( l_stats_samp ) then
+    if ( stats_metadata%l_stats_samp ) then
 
       !$acc update host( rhs_ta, lhs_ta, xap2, xbp2, wp2, invrs_tau_C14_zm, invrs_tau_C4_zm, &
       !$acc              rhs_pr2, lhs_splat_wp2, rhs_term_tp, lhs_dp1_C14, lhs_dp1_C4 )
@@ -3175,11 +3230,13 @@ module advance_xp2_xpyp_module
       ! stat_begin_update_pt.  Since stat_begin_update_pt automatically
       ! subtracts the value sent in, reverse the sign on term_ta_ADG1_rhs.
 
-      call term_pr1( nz, ngrdcol, C4, zero, xbp2, &
+      zeros_vector = zero
+
+      call term_pr1( nz, ngrdcol, C4, zeros_vector, xbp2, &
                      wp2, invrs_tau_C4_zm, invrs_tau_C14_zm, &
                      stats_pr1 )
 
-      call term_pr1( nz, ngrdcol, zero, C14, xbp2, &
+      call term_pr1( nz, ngrdcol, zeros_vector, C14, xbp2, &
                      wp2, invrs_tau_C4_zm, invrs_tau_C14_zm, &
                      stats_pr2 )
 
@@ -3230,7 +3287,7 @@ module advance_xp2_xpyp_module
 
           ! x'y' term tp is completely explicit; call stat_update_var_pt.
           call stat_update_var_pt( ixapxbp_tp, k,                         & ! Intent(in) 
-                                   ( one - C_uu_shr ) * rhs_term_tp(i,k), & ! intent(in)
+                                   ( one - C_uu_shr(i) ) * rhs_term_tp(i,k), & ! intent(in)
                                    stats_zm(i) )                            ! Intent(inout)
 
           ! Vertical compression of eddies.
@@ -3240,7 +3297,7 @@ module advance_xp2_xpyp_module
         end do
       end do
 
-    endif ! l_stats_samp
+    endif ! stats_metadata%l_stats_samp
 
 
     ! Boundary Conditions
@@ -3269,8 +3326,9 @@ module advance_xp2_xpyp_module
                            wpxap, wpxbp, & ! In
                            xam, xbm, xapxbp, xpyp_forcing, & ! In
                            Cn, invrs_tau_zm, threshold, & ! In
-                           lhs_ta, rhs_ta, &
-                           stats_zm, & ! intent(inout)
+                           lhs_ta, rhs_ta, & ! In
+                           stats_metadata, & ! In
+                           stats_zm, & ! In
                            rhs ) ! Out
 
   ! Description:
@@ -3315,20 +3373,7 @@ module advance_xp2_xpyp_module
         stat_modify_pt
 
     use stats_variables, only: & 
-        irtp2_ta,      & ! Variable(s)
-        irtp2_tp,      & 
-        irtp2_dp1,     &
-        irtp2_forcing, &
-        ithlp2_ta,      & 
-        ithlp2_tp,      &
-        ithlp2_dp1,     &
-        ithlp2_forcing, & 
-        irtpthlp_ta,      & 
-        irtpthlp_tp1,     & 
-        irtpthlp_tp2,     &
-        irtpthlp_dp1,     &
-        irtpthlp_forcing, & 
-        l_stats_samp
+        stats_metadata_type
   
     use advance_helper_module, only: &
         set_boundary_conditions_rhs    ! Procedure(s)
@@ -3373,6 +3418,9 @@ module advance_xp2_xpyp_module
     real( kind = core_rknd ), intent(in) :: &
       threshold    ! Smallest allowable mag. value for x_a'x_b'  [{x_am units}
                    !                                              *{x_bm units}]
+
+    type (stats_metadata_type), intent(in) :: &
+      stats_metadata
 
     !------------------- InOut Variables -------------------
     type (stats), target, dimension(ngrdcol), intent(inout) :: &
@@ -3428,26 +3476,26 @@ module advance_xp2_xpyp_module
 
     select case ( solve_type )
     case ( xp2_xpyp_rtp2 )
-      ixapxbp_ta  = irtp2_ta
-      ixapxbp_tp  = irtp2_tp
+      ixapxbp_ta  = stats_metadata%irtp2_ta
+      ixapxbp_tp  = stats_metadata%irtp2_tp
       ixapxbp_tp1 = 0
       ixapxbp_tp2 = 0
-      ixapxbp_dp1 = irtp2_dp1
-      ixapxbp_f   = irtp2_forcing
+      ixapxbp_dp1 = stats_metadata%irtp2_dp1
+      ixapxbp_f   = stats_metadata%irtp2_forcing
     case ( xp2_xpyp_thlp2 )
-      ixapxbp_ta  = ithlp2_ta
-      ixapxbp_tp  = ithlp2_tp
+      ixapxbp_ta  = stats_metadata%ithlp2_ta
+      ixapxbp_tp  = stats_metadata%ithlp2_tp
       ixapxbp_tp1 = 0
       ixapxbp_tp2 = 0
-      ixapxbp_dp1 = ithlp2_dp1
-      ixapxbp_f   = ithlp2_forcing
+      ixapxbp_dp1 = stats_metadata%ithlp2_dp1
+      ixapxbp_f   = stats_metadata%ithlp2_forcing
     case ( xp2_xpyp_rtpthlp )
-      ixapxbp_ta  = irtpthlp_ta
+      ixapxbp_ta  = stats_metadata%irtpthlp_ta
       ixapxbp_tp  = 0
-      ixapxbp_tp1 = irtpthlp_tp1
-      ixapxbp_tp2 = irtpthlp_tp2
-      ixapxbp_dp1 = irtpthlp_dp1
-      ixapxbp_f   = irtpthlp_forcing
+      ixapxbp_tp1 = stats_metadata%irtpthlp_tp1
+      ixapxbp_tp2 = stats_metadata%irtpthlp_tp2
+      ixapxbp_dp1 = stats_metadata%irtpthlp_dp1
+      ixapxbp_f   = stats_metadata%irtpthlp_forcing
     case default ! No budgets for passive scalars
       ixapxbp_ta  = 0
       ixapxbp_tp  = 0
@@ -3547,7 +3595,7 @@ module advance_xp2_xpyp_module
     end do
     !$acc end parallel loop
 
-    if ( l_stats_samp ) then
+    if ( stats_metadata%l_stats_samp ) then
 
       !$acc update host( rhs_ta, lhs_ta, xapxbp, Cn, invrs_tau_zm, xam, rhs_term_tp, &
       !$acc              xbm, wpxbp, wpxap, xpyp_forcing, rhs_term_dp1, lhs_term_dp1 )
@@ -3636,7 +3684,7 @@ module advance_xp2_xpyp_module
         end do
       end do ! k=2..gr%nz-1
       
-    end if ! l_stats_samp
+    end if ! stats_metadata%l_stats_samp
 
 
     ! Boundary Conditions
@@ -3663,7 +3711,8 @@ module advance_xp2_xpyp_module
   end subroutine xp2_xpyp_rhs
 
   !=============================================================================================
-  subroutine calc_xp2_xpyp_ta_terms( nz, ngrdcol, gr, wprtp, wprtp2, wpthlp, wpthlp2, wprtpthlp, &
+  subroutine calc_xp2_xpyp_ta_terms( nz, ngrdcol, sclr_dim, gr, &
+                                     wprtp, wprtp2, wpthlp, wpthlp2, wprtpthlp, &
                                      rtp2, thlp2, rtpthlp, upwp, vpwp, up2, vp2, wp2, &
                                      wp2_zt, wpsclrp, wpsclrp2, wpsclrprtp, wpsclrpthlp, &
                                      sclrp2, sclrprtp, sclrpthlp, &
@@ -3672,6 +3721,7 @@ module advance_xp2_xpyp_module
                                      pdf_implicit_coefs_terms, l_scalar_calc, &
                                      beta, iiPDF_type, l_upwind_xpyp_ta, &
                                      l_godunov_upwind_xpyp_ta, & 
+                                     stats_metadata, &
                                      stats_zt, &
                                      lhs_ta_wprtp2, lhs_ta_wpthlp2, lhs_ta_wprtpthlp, &
                                      lhs_ta_wpup2, lhs_ta_wpvp2, lhs_ta_wpsclrp2, &
@@ -3704,9 +3754,6 @@ module advance_xp2_xpyp_module
         zero, &
         zero_threshold
       
-    use parameters_model, only: &
-        sclr_dim  ! Number of passive scalar variables
-      
     use pdf_parameter_module, only: &
         implicit_coefs_terms    ! Variable Type
 
@@ -3723,13 +3770,7 @@ module advance_xp2_xpyp_module
         l_explicit_turbulent_adv_xpyp     ! Logical constant
       
     use stats_variables, only: &
-        l_stats_samp,             & ! Logical constant
-        icoef_wprtp2_implicit,    &
-        iterm_wprtp2_explicit,    &
-        icoef_wpthlp2_implicit,   &
-        iterm_wpthlp2_explicit,   &
-        icoef_wprtpthlp_implicit, &
-        iterm_wprtpthlp_explicit
+        stats_metadata_type
       
     use stats_type_utilities, only: & 
         stat_update_var   ! Procedure(s)
@@ -3740,10 +3781,12 @@ module advance_xp2_xpyp_module
 
     !------------------- Input Variables -------------------
     integer, intent(in) :: &
-      nz, &
-      ngrdcol
+      nz,       & ! Number of vertical levels
+      ngrdcol,  & ! Number of grid columns
+      sclr_dim    ! Number of passive scalars
     
-    type (grid), target, intent(in) :: gr
+    type (grid), target, intent(in) :: &
+      gr
         
     type(implicit_coefs_terms), intent(in) :: &
       pdf_implicit_coefs_terms    ! Implicit coefs / explicit terms [units vary]
@@ -3785,7 +3828,7 @@ module advance_xp2_xpyp_module
     logical, intent(in) :: &
       l_scalar_calc
 
-    real( kind = core_rknd ), intent(in) :: &
+    real( kind = core_rknd ), dimension(ngrdcol), intent(in) :: &
       beta    ! CLUBB tunable parameter beta
 
     integer, intent(in) :: &
@@ -3803,6 +3846,9 @@ module advance_xp2_xpyp_module
                                ! approximation rather than a centered differencing for  turbulent 
                                ! or mean advection terms. It affects rtp2, thlp2, up2, vp2, sclrp2,
                                ! rtpthlp, sclrprtp, & sclrpthlp.
+
+    type (stats_metadata_type), intent(in) :: &
+          stats_metadata
 
     !------------------- Inout Variables -------------------
     type (stats), target, dimension(ngrdcol), intent(inout) :: &
@@ -3943,6 +3989,9 @@ module advance_xp2_xpyp_module
       wp_coef, &
       wp_coef_zt
 
+    real ( kind = core_rknd ), dimension(nz) :: &
+      tmp_in
+
     integer :: &
       sclr, i, b, k, l  ! Loop index
 
@@ -3985,21 +4034,13 @@ module advance_xp2_xpyp_module
 
     ! Interpolate a_1 from the momentum levels to the thermodynamic levels.
     ! Positive definite quantity
-    a1_zt(:,:) = zm2zt( nz, ngrdcol, gr, a1(:,:) )
+    a1_zt(:,:) = zm2zt( nz, ngrdcol, gr, a1(:,:), zero_threshold )
 
     !$acc parallel loop gang vector collapse(2) default(present)
     do k = 1, nz
       do i = 1, ngrdcol
-        a1_zt(i,k) = max( a1_zt(i,k), zero_threshold ) 
-      end do
-    end do
-    !$acc end parallel loop
-
-    !$acc parallel loop gang vector collapse(2) default(present)
-    do k = 1, nz
-      do i = 1, ngrdcol
-        wp_coef(i,k)    = ( one - one_third * beta ) *    a1(i,k)**2 *    wp3_on_wp2(i,k) /    wp2(i,k)
-        wp_coef_zt(i,k) = ( one - one_third * beta ) * a1_zt(i,k)**2 * wp3_on_wp2_zt(i,k) / wp2_zt(i,k)
+        wp_coef(i,k)    = ( one - one_third * beta(i) ) *    a1(i,k)**2 *    wp3_on_wp2(i,k) /    wp2(i,k)
+        wp_coef_zt(i,k) = ( one - one_third * beta(i) ) * a1_zt(i,k)**2 * wp3_on_wp2_zt(i,k) / wp2_zt(i,k)
       end do
     end do
     !$acc end parallel loop
@@ -4013,7 +4054,7 @@ module advance_xp2_xpyp_module
       ! <w'x'y'> are calculated on thermodynamic levels.
       
       ! These coefficients only need to be set if stats output is on
-      if( l_stats_samp ) then
+      if( stats_metadata%l_stats_samp ) then
         !$acc parallel loop gang vector collapse(2) default(present)
         do k = 1, nz
           do i = 1, ngrdcol
@@ -4057,7 +4098,7 @@ module advance_xp2_xpyp_module
         
       ! The termo-level terms only need to be set if we're not using l_upwind_xpyp_ta,
       ! or if stats output is on
-      if ( .not. l_upwind_xpyp_ta .or. l_stats_samp ) then
+      if ( .not. l_upwind_xpyp_ta .or. stats_metadata%l_stats_samp ) then
         !$acc parallel loop gang vector collapse(2) default(present)
         do k = 1, nz
           do i = 1, ngrdcol
@@ -4256,12 +4297,12 @@ module advance_xp2_xpyp_module
     
         ! The termodynamic grid level coefficients are only needed if l_upwind_xpyp_ta
         ! is false, or if stats output is on
-        if( .not. l_upwind_xpyp_ta .or. l_stats_samp ) then
+        if( .not. l_upwind_xpyp_ta .or. stats_metadata%l_stats_samp ) then
           !$acc parallel loop gang vector collapse(2) default(present)
           do k = 1, nz
             do i = 1, ngrdcol
-              coef_wprtp2_implicit(i,k) = one_third * beta * a1_zt(i,k) * wp3_on_wp2_zt(i,k)
-              coef_wpthlp2_implicit(i,k) = coef_wprtp2_implicit(i,k)
+              coef_wprtp2_implicit(i,k)    = one_third * beta(i) * a1_zt(i,k) * wp3_on_wp2_zt(i,k)
+              coef_wpthlp2_implicit(i,k)   = coef_wprtp2_implicit(i,k)
               coef_wprtpthlp_implicit(i,k) = coef_wprtp2_implicit(i,k)
             end do
           end do
@@ -4274,7 +4315,7 @@ module advance_xp2_xpyp_module
           !$acc parallel loop gang vector collapse(2) default(present)
           do k = 1, nz
             do i = 1, ngrdcol
-              coef_wprtp2_implicit_zm(i,k) = one_third * beta * a1(i,k) * wp3_on_wp2(i,k)
+              coef_wprtp2_implicit_zm(i,k) = one_third * beta(i) * a1(i,k) * wp3_on_wp2(i,k)
               sgn_t_vel_rtp2(i,k) = wp3_on_wp2(i,k)
             end do
           end do
@@ -4298,8 +4339,8 @@ module advance_xp2_xpyp_module
           !$acc parallel loop gang vector collapse(2) default(present)
           do k = 1, nz
             do i = 1, ngrdcol  
-              coef_wprtp2_implicit(i,k) = one_third * beta * a1_zt(i,k) * wp3_on_wp2_zt(i,k)
-              coef_wpthlp2_implicit(i,k) = coef_wprtp2_implicit(i,k)
+              coef_wprtp2_implicit(i,k)    = one_third * beta(i) * a1_zt(i,k) * wp3_on_wp2_zt(i,k)
+              coef_wpthlp2_implicit(i,k)   = coef_wprtp2_implicit(i,k)
               coef_wprtpthlp_implicit(i,k) = coef_wprtp2_implicit(i,k)
             end do
           end do
@@ -4345,7 +4386,7 @@ module advance_xp2_xpyp_module
 
         ! The termodynamic grid level term are only needed if l_upwind_xpyp_ta
         ! is false, or if stats output is on
-        if( .not. l_upwind_xpyp_ta .or. l_stats_samp ) then
+        if( .not. l_upwind_xpyp_ta .or. stats_metadata%l_stats_samp ) then
             
           wprtp_zt(:,:)  = zm2zt( nz, ngrdcol, gr, wprtp(:,:) )
           wpthlp_zt(:,:) = zm2zt( nz, ngrdcol, gr, wpthlp(:,:) )
@@ -4695,7 +4736,7 @@ module advance_xp2_xpyp_module
        
         ! The termodynamic grid level coefficients are only needed if l_upwind_xpyp_ta
         ! is false, or if stats output is on
-        if( .not. l_upwind_xpyp_ta .or. l_stats_samp ) then
+        if( .not. l_upwind_xpyp_ta .or. stats_metadata%l_stats_samp ) then
           coef_wprtp2_implicit(:,:) = pdf_implicit_coefs_terms%coef_wprtp2_implicit(:,:)
           coef_wpthlp2_implicit(:,:) = pdf_implicit_coefs_terms%coef_wpthlp2_implicit(:,:)
           coef_wprtpthlp_implicit(:,:) = pdf_implicit_coefs_terms%coef_wprtpthlp_implicit(:,:)
@@ -4765,7 +4806,7 @@ module advance_xp2_xpyp_module
         ! The termodynamic grid level term are only needed if l_upwind_xpyp_ta
         ! is false, or if stats output is on. The value of term_wprtp2_explicit_zm 
         ! and term_wpthlp2_explicit are always 0.
-        if( .not. l_upwind_xpyp_ta .or. l_stats_samp ) then
+        if( .not. l_upwind_xpyp_ta .or. stats_metadata%l_stats_samp ) then
           term_wprtp2_explicit(:,:) = zero
           term_wpthlp2_explicit(:,:) = zero
           term_wprtpthlp_explicit(:,:) = pdf_implicit_coefs_terms%term_wprtpthlp_explicit(:,:)
@@ -4796,7 +4837,7 @@ module advance_xp2_xpyp_module
 
         ! The new hybrid PDF is used.
 
-        if ( .not. l_upwind_xpyp_ta .or. l_stats_samp ) then
+        if ( .not. l_upwind_xpyp_ta .or. stats_metadata%l_stats_samp ) then
           coef_wprtp2_implicit(:,:) = pdf_implicit_coefs_terms%coef_wprtp2_implicit(:,:)
           term_wprtp2_explicit(:,:) = pdf_implicit_coefs_terms%term_wprtp2_explicit(:,:)
         endif
@@ -4830,7 +4871,7 @@ module advance_xp2_xpyp_module
                                    term_wprtp2_explicit_zm,               & ! Intent(in)
                                    rhs_ta_wprtp2 )                          ! Intent(out)
 
-        if ( .not. l_upwind_xpyp_ta .or. l_stats_samp ) then
+        if ( .not. l_upwind_xpyp_ta .or. stats_metadata%l_stats_samp ) then
           coef_wpthlp2_implicit(:,:) = pdf_implicit_coefs_terms%coef_wpthlp2_implicit(:,:)
           term_wpthlp2_explicit(:,:) = pdf_implicit_coefs_terms%term_wpthlp2_explicit(:,:)
         endif
@@ -4864,7 +4905,7 @@ module advance_xp2_xpyp_module
                                    term_wpthlp2_explicit_zm,                & ! Intent(in)
                                    rhs_ta_wpthlp2 )                           ! Intent(out)
 
-        if ( .not. l_upwind_xpyp_ta .or. l_stats_samp ) then
+        if ( .not. l_upwind_xpyp_ta .or. stats_metadata%l_stats_samp ) then
           coef_wprtpthlp_implicit(:,:) = pdf_implicit_coefs_terms%coef_wprtpthlp_implicit(:,:)
           term_wprtpthlp_explicit(:,:) = pdf_implicit_coefs_terms%term_wprtpthlp_explicit(:,:)
         endif
@@ -4898,7 +4939,7 @@ module advance_xp2_xpyp_module
                                    term_wprtpthlp_explicit_zm,                & ! Intent(in)
                                    rhs_ta_wprtpthlp )                           ! Intent(out)
 
-        if ( .not. l_upwind_xpyp_ta .or. l_stats_samp ) then
+        if ( .not. l_upwind_xpyp_ta .or. stats_metadata%l_stats_samp ) then
           coef_wpup2_implicit(:,:) = pdf_implicit_coefs_terms%coef_wpup2_implicit(:,:)
           term_wpup2_explicit(:,:) = pdf_implicit_coefs_terms%term_wpup2_explicit(:,:)
         endif
@@ -4932,7 +4973,7 @@ module advance_xp2_xpyp_module
                                    term_wpup2_explicit_zm,                & ! Intent(in)
                                    rhs_ta_wpup2 )                           ! Intent(out)
 
-        if ( .not. l_upwind_xpyp_ta .or. l_stats_samp ) then
+        if ( .not. l_upwind_xpyp_ta .or. stats_metadata%l_stats_samp ) then
           coef_wpvp2_implicit(:,:) = pdf_implicit_coefs_terms%coef_wpvp2_implicit(:,:)
           term_wpvp2_explicit(:,:) = pdf_implicit_coefs_terms%term_wpvp2_explicit(:,:)
         endif
@@ -4970,7 +5011,7 @@ module advance_xp2_xpyp_module
 
           do sclr = 1, sclr_dim, 1
 
-            if ( .not. l_upwind_xpyp_ta .or. l_stats_samp ) then
+            if ( .not. l_upwind_xpyp_ta .or. stats_metadata%l_stats_samp ) then
               coef_wpsclrp2_implicit(:,:) =pdf_implicit_coefs_terms%coef_wpsclrp2_implicit(:,:,sclr)
               term_wpsclrp2_explicit(:,:) =pdf_implicit_coefs_terms%term_wpsclrp2_explicit(:,:,sclr)
             endif
@@ -5004,7 +5045,7 @@ module advance_xp2_xpyp_module
                                        term_wpsclrp2_explicit_zm,               & ! In
                                        rhs_ta_wpsclrp2(:,:,sclr) )                ! Out
 
-            if ( .not. l_upwind_xpyp_ta .or. l_stats_samp ) then
+            if ( .not. l_upwind_xpyp_ta .or. stats_metadata%l_stats_samp ) then
               coef_wprtpsclrp_implicit(:,:) &
                       = pdf_implicit_coefs_terms%coef_wprtpsclrp_implicit(:,:,sclr)
               term_wprtpsclrp_explicit(:,:) &
@@ -5041,7 +5082,7 @@ module advance_xp2_xpyp_module
                                        term_wprtpsclrp_explicit_zm,               & ! In
                                        rhs_ta_wprtpsclrp(:,:,sclr) )                ! In
 
-            if ( .not. l_upwind_xpyp_ta .or. l_stats_samp ) then
+            if ( .not. l_upwind_xpyp_ta .or. stats_metadata%l_stats_samp ) then
               coef_wpthlpsclrp_implicit(:,:) &
                     = pdf_implicit_coefs_terms%coef_wpthlpsclrp_implicit(:,:,sclr)
               term_wpthlpsclrp_explicit(:,:) &
@@ -5108,7 +5149,7 @@ module advance_xp2_xpyp_module
         !$acc parallel loop gang vector collapse(2) default(present)
         do k = 1, nz
           do i = 1, ngrdcol              
-            coef_wpup2_implicit_zm(i,k) = one_third * beta * a1(i,k) * wp3_on_wp2(i,k)
+            coef_wpup2_implicit_zm(i,k) = one_third * beta(i) * a1(i,k) * wp3_on_wp2(i,k)
             coef_wpvp2_implicit_zm(i,k) = coef_wpup2_implicit_zm(i,k)
             term_wpup2_explicit_zm(i,k) = wp_coef(i,k) * upwp(i,k)**2
             term_wpvp2_explicit_zm(i,k) = wp_coef(i,k) * vpwp(i,k)**2
@@ -5140,7 +5181,7 @@ module advance_xp2_xpyp_module
         !$acc parallel loop gang vector collapse(2) default(present)
         do k = 1, nz
           do i = 1, ngrdcol        
-            coef_wpup2_implicit(i,k) = one_third * beta * a1_zt(i,k) * wp3_on_wp2_zt(i,k)
+            coef_wpup2_implicit(i,k) = one_third * beta(i) * a1_zt(i,k) * wp3_on_wp2_zt(i,k)
             coef_wpvp2_implicit(i,k) = coef_wpup2_implicit(i,k)
           end do
         end do
@@ -5202,25 +5243,38 @@ module advance_xp2_xpyp_module
     ! Stats output for implicit coefficients and explicit terms of 
     ! <w'rt'^2>, <w'thl'^2>, and <w'rt'thl'> used in the calcualtion of
     ! the turbulent advection terms
-    if ( l_stats_samp ) then
+    if ( stats_metadata%l_stats_samp ) then
       !$acc update host( coef_wprtp2_implicit, term_wprtp2_explicit, &
       !$acc              coef_wpthlp2_implicit, term_wpthlp2_explicit, &
       !$acc              coef_wprtpthlp_implicit, term_wprtpthlp_explicit )
       do i = 1, ngrdcol
-        call stat_update_var( icoef_wprtp2_implicit, coef_wprtp2_implicit(i,:), & ! intent(in)
+        tmp_in(1) = 0.0_core_rknd
+        tmp_in(2:nz) = coef_wprtp2_implicit(i,2:nz)
+        !call stat_update_var( stats_metadata%icoef_wprtp2_implicit, coef_wprtp2_implicit(i,:), & ! intent(in)
+        call stat_update_var( stats_metadata%icoef_wprtp2_implicit, tmp_in, & ! intent(in)
                               stats_zt(i) )                                     ! intent(inout)
-        call stat_update_var( iterm_wprtp2_explicit, term_wprtp2_explicit(i,:), & ! intent(in)
+        tmp_in(2:nz) = term_wprtp2_explicit(i,2:nz)
+        !call stat_update_var( stats_metadata%iterm_wprtp2_explicit, term_wprtp2_explicit(i,:), & ! intent(in)
+        call stat_update_var( stats_metadata%iterm_wprtp2_explicit, tmp_in, & ! intent(in)
                               stats_zt(i) )                                     ! intent(in)
-        call stat_update_var( icoef_wpthlp2_implicit, coef_wpthlp2_implicit(i,:), & ! intent(in)
+        tmp_in(2:nz) = coef_wpthlp2_implicit(i,2:nz)
+        !call stat_update_var( stats_metadata%icoef_wpthlp2_implicit, coef_wpthlp2_implicit(i,:), & ! intent(in)
+        call stat_update_var( stats_metadata%icoef_wpthlp2_implicit, tmp_in, & ! intent(in)
                               stats_zt(i) ) ! intent(inout)
-        call stat_update_var( iterm_wpthlp2_explicit, term_wpthlp2_explicit(i,:), & ! intent(in)
+        tmp_in(2:nz) = term_wpthlp2_explicit(i,2:nz)
+        !call stat_update_var( stats_metadata%iterm_wpthlp2_explicit, term_wpthlp2_explicit(i,:), & ! intent(in)
+        call stat_update_var( stats_metadata%iterm_wpthlp2_explicit, tmp_in, & ! intent(in)
                               stats_zt(i) ) ! intent(inout)
-        call stat_update_var( icoef_wprtpthlp_implicit, coef_wprtpthlp_implicit(i,:), & ! intent(in)
+        tmp_in(2:nz) = coef_wprtpthlp_implicit(i,2:nz)
+        !call stat_update_var( stats_metadata%icoef_wprtpthlp_implicit, coef_wprtpthlp_implicit(i,:), & ! intent(in)
+        call stat_update_var( stats_metadata%icoef_wprtpthlp_implicit, tmp_in, & ! intent(in)
                               stats_zt(i) ) ! intent(inout)
-        call stat_update_var( iterm_wprtpthlp_explicit, term_wprtpthlp_explicit(i,:), & ! intent(in)
+        tmp_in(2:nz) = term_wprtpthlp_explicit(i,2:nz)
+        !call stat_update_var( stats_metadata%iterm_wprtpthlp_explicit, term_wprtpthlp_explicit(i,:), & ! intent(in)
+        call stat_update_var( stats_metadata%iterm_wprtpthlp_explicit, tmp_in, & ! intent(in)
                               stats_zt(i) ) ! intent(inout)
       end do
-    end if ! l_stats_samp
+    end if ! stats_metadata%l_stats_samp
 
     !$acc exit data delete( coef_wprtp2_implicit, term_wprtp2_explicit, &
     !$acc                 coef_wprtp2_implicit_zm, term_wprtp2_explicit_zm, &
@@ -5610,7 +5664,7 @@ module advance_xp2_xpyp_module
       nz, &
       ngrdcol
 
-    real( kind = core_rknd ), intent(in) :: & 
+    real( kind = core_rknd ), dimension(ngrdcol), intent(in) :: & 
       C4,              & ! Model parameter C_4                                 [-]
       C14                ! Model parameter C_14                                [-]
 
@@ -5630,15 +5684,15 @@ module advance_xp2_xpyp_module
 
     !------------------------- Begin Code -------------------------
 
-    !$acc data copyin( xbp2, wp2, invrs_tau_C4_zm, invrs_tau_C14_zm ) &
-    !$acc     copyout( rhs )
+    !$acc data copyin( xbp2, wp2, invrs_tau_C4_zm, invrs_tau_C14_zm, C4, C14 ) &
+    !$acc      copyout( rhs )
 
     !$acc parallel loop gang vector collapse(2) default(present)
     do k = 2, nz-1
       do i = 1, ngrdcol
-        rhs(i,k) = + one_third * C4 * ( xbp2(i,k) + wp2(i,k) ) * invrs_tau_C4_zm(i,k)  &
-                   - one_third * C14 * ( xbp2(i,k) + wp2(i,k) ) * invrs_tau_C14_zm(i,k)  &
-                   + C14 * invrs_tau_C14_zm(i,k) * w_tol_sqd
+        rhs(i,k) = + one_third * C4(i) * ( xbp2(i,k) + wp2(i,k) ) * invrs_tau_C4_zm(i,k)  &
+                   - one_third * C14(i) * ( xbp2(i,k) + wp2(i,k) ) * invrs_tau_C14_zm(i,k)  &
+                   + C14(i) * invrs_tau_C14_zm(i,k) * w_tol_sqd
       end do
     end do
     !$acc end parallel loop
@@ -5718,7 +5772,7 @@ module advance_xp2_xpyp_module
 
     type (grid), intent(in) :: gr
       
-    real( kind = core_rknd ), intent(in) :: & 
+    real( kind = core_rknd ), dimension(ngrdcol), intent(in) :: & 
       C_uu_shr,  & ! Model parameter C_uu_shr                       [-]
       C_uu_buoy    ! Model parameter C_uu_buoy                      [-]
       
@@ -5754,9 +5808,9 @@ module advance_xp2_xpyp_module
     do k = 2, nz-1
       do i = 1, ngrdcol
         rhs_pr2(i,k) = + two_thirds &
-                       * ( C_uu_buoy &
+                       * ( C_uu_buoy(i) &
                           * ( grav / thv_ds_zm(i,k) ) * wpthvp(i,k) &
-                        + C_uu_shr &
+                        + C_uu_shr(i) &
                           * ( - upwp(i,k) * gr%invrs_dzm(i,k) * ( um(i,k+1) - um(i,k) ) &
                               - vpwp(i,k) * gr%invrs_dzm(i,k) * ( vm(i,k+1) - vm(i,k) ) &
                             ) &
@@ -5779,6 +5833,7 @@ module advance_xp2_xpyp_module
   subroutine pos_definite_variances( nz, ngrdcol, gr, &
                                      solve_type, dt, tolerance, &
                                      rho_ds_zm, rho_ds_zt, &
+                                     stats_metadata, &
                                      stats_zm, &
                                      xp2_np1 )
 
@@ -5792,8 +5847,8 @@ module advance_xp2_xpyp_module
     use clubb_precision, only: core_rknd
 
     use stats_variables, only:  & 
-        l_stats_samp, & 
-        irtp2_pd, ithlp2_pd, iup2_pd, ivp2_pd ! variables
+        stats_metadata_type
+
     use stats_type_utilities, only:  & 
         stat_begin_update, stat_end_update ! subroutines
 
@@ -5823,6 +5878,9 @@ module advance_xp2_xpyp_module
       rho_ds_zm, & ! Dry, static density on momentum levels         [kg/m^3]
       rho_ds_zt    ! Dry, static density on thermodynamic levels    [kg/m^3]
 
+    type (stats_metadata_type), intent(in) :: &
+      stats_metadata
+
     !------------------- Input/Output variables ------------------
     type (stats), target, dimension(ngrdcol), intent(inout) :: &
       stats_zm
@@ -5838,18 +5896,18 @@ module advance_xp2_xpyp_module
 
     select case( solve_type )
     case ( xp2_xpyp_rtp2 )
-      ixp2_pd = irtp2_pd
+      ixp2_pd = stats_metadata%irtp2_pd
     case ( xp2_xpyp_thlp2 )
-      ixp2_pd = ithlp2_pd
+      ixp2_pd = stats_metadata%ithlp2_pd
     case ( xp2_xpyp_up2 )
-      ixp2_pd = iup2_pd
+      ixp2_pd = stats_metadata%iup2_pd
     case ( xp2_xpyp_vp2 )
-      ixp2_pd = ivp2_pd
+      ixp2_pd = stats_metadata%ivp2_pd
     case default
       ixp2_pd = 0 ! This includes the passive scalars
     end select
 
-    if ( l_stats_samp ) then
+    if ( stats_metadata%l_stats_samp ) then
 
       !$acc update host( xp2_np1 )
 
@@ -5864,11 +5922,11 @@ module advance_xp2_xpyp_module
     ! The first pass-through should draw from only two levels on either side
     ! of the hole.
     ! upper_hf_level = nz-1 since we are filling the zm levels
-    call fill_holes_vertical( nz, ngrdcol, num_hf_draw_points, tolerance, nz-1, & ! In
-                              gr%dzm, rho_ds_zm,                                & ! In
-                              xp2_np1 )                                           ! InOut
+    call fill_holes_vertical( nz, ngrdcol, tolerance, nz-1, & ! In
+                              gr%dzm, rho_ds_zm,            & ! In
+                              xp2_np1 )                       ! InOut
 
-    if ( l_stats_samp ) then
+    if ( stats_metadata%l_stats_samp ) then
 
       !$acc update host( xp2_np1 )
 
@@ -6052,6 +6110,7 @@ module advance_xp2_xpyp_module
     wprtp_mc    = zt2zm( nz, ngrdcol, gr, wprtp_mc_zt )
     wpthlp_mc   = zt2zm( nz, ngrdcol, gr, wpthlp_mc_zt )
     rtpthlp_mc  = zt2zm( nz, ngrdcol, gr, rtpthlp_mc_zt )
+    
   end subroutine update_xp2_mc
 
 !===============================================================================

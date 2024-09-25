@@ -26,12 +26,13 @@ module advance_xp3_module
   contains
 
   !=============================================================================
-  subroutine advance_xp3( nz, ngrdcol, gr, dt,                       & ! Intent(in)
+  subroutine advance_xp3( nz, ngrdcol, sclr_dim, sclr_tol, gr, dt,   & ! Intent(in)
                           rtm, thlm, rtp2, thlp2, wprtp,             & ! Intent(in)
                           wpthlp, wprtp2, wpthlp2, rho_ds_zm,        & ! Intent(in)
                           invrs_rho_ds_zt, invrs_tau_zt, tau_max_zt, & ! Intent(in)
                           sclrm, sclrp2, wpsclrp, wpsclrp2,          & ! Intent(in)
                           l_lmm_stepping,                            & ! Intent(in)
+                          stats_metadata,                            & ! Intent(in)
                           stats_zt,                                  & ! intent(inout)
                           rtp3, thlp3, sclrp3 )                        ! Intent(inout)
 
@@ -51,23 +52,28 @@ module advance_xp3_module
         rt_tol,  & ! Variable(s)
         thl_tol
 
-    use parameters_model, only: &
-        sclr_dim, & ! Variable(s)
-        sclr_tol
-
     use clubb_precision, only: &
         core_rknd    ! Variable(s)
 
-    use stats_type, only: stats ! Type
+    use stats_type, only: &
+        stats ! Type
+
+    use stats_variables, only: &  
+        stats_metadata_type
 
     implicit none
 
     ! --------------------- Input Variables ---------------------
     integer, intent(in) :: &
-      nz, &
-      ngrdcol
+      nz,           & ! Number of vertical levels
+      ngrdcol,      & ! Number of grid columns
+      sclr_dim        ! Number of passive scalars
+
+    real( kind = core_rknd ), intent(in), dimension(sclr_dim) :: & 
+      sclr_tol          ! Threshold(s) on the passive scalars  [units vary]
     
-    type (grid), target, intent(in) :: gr
+    type (grid), target, intent(in) :: &
+      gr
   
     real( kind = core_rknd ), intent(in) :: &
       dt                 ! Model timestep                            [s]
@@ -95,6 +101,9 @@ module advance_xp3_module
     logical, intent(in) :: &
       l_lmm_stepping    ! Apply Linear Multistep Method (LMM) Stepping
 
+    type (stats_metadata_type), intent(in) :: &
+      stats_metadata
+
     ! --------------------- Input/Output Variables ---------------------
     type (stats), target, dimension(ngrdcol), intent(inout) :: &
       stats_zt
@@ -118,6 +127,7 @@ module advance_xp3_module
                                  invrs_rho_ds_zt,               & ! Intent(in)
                                  invrs_tau_zt, tau_max_zt,      & ! Intent(in) 
                                  rt_tol, l_lmm_stepping,        & ! Intent(in)
+                                 stats_metadata,                & ! Intent(in)
                                  stats_zt,                      & ! intent(inout)
                                  rtp3 )                           ! Intent(inout)
 
@@ -129,6 +139,7 @@ module advance_xp3_module
                                  invrs_rho_ds_zt,                 & ! Intent(in)
                                  invrs_tau_zt, tau_max_zt,        & ! Intent(in) 
                                  thl_tol, l_lmm_stepping,         & ! Intent(in)
+                                 stats_metadata,                  & ! Intent(in)
                                  stats_zt,                        & ! intent(inout)
                                  thlp3 )                            ! Intent(inout)
 
@@ -141,6 +152,7 @@ module advance_xp3_module
                                   invrs_rho_ds_zt,                                      & ! In
                                   invrs_tau_zt, tau_max_zt,                             & ! In 
                                   sclr_tol(sclr), l_lmm_stepping,                       & ! In
+                                  stats_metadata,                                       & ! Intent(in)
                                   stats_zt,                                             & ! In/Out
                                   sclrp3(:,:,sclr) )                                      ! In/Out
     end do ! i = 1, sclr_dim
@@ -156,7 +168,8 @@ module advance_xp3_module
                                      invrs_rho_ds_zt,                 & ! Intent(in)
                                      invrs_tau_zt, tau_max_zt,        & ! Intent(in) 
                                      x_tol, l_lmm_stepping,           & ! Intent(in)
-                                     stats_zt,                        & ! intent(inout)
+                                     stats_metadata,                  & ! Intent(in)
+                                     stats_zt,                        & ! Intent(inout)
                                      xp3 )                              ! Intent(inout)
 
     ! Description:
@@ -266,7 +279,8 @@ module advance_xp3_module
     use constants_clubb, only: &
         one,      & ! Variable(s)
         one_half, &
-        zero
+        zero, &
+        zero_threshold
 
     use stats_type_utilities, only: &
         stat_begin_update, & ! Procedure(s)
@@ -274,15 +288,7 @@ module advance_xp3_module
         stat_update_var
 
     use stats_variables, only: &
-        irtp3_bt,     & ! Variable(s)
-        irtp3_tp,     &
-        irtp3_ac,     &
-        irtp3_dp,     &
-        ithlp3_bt,    &
-        ithlp3_tp,    &
-        ithlp3_ac,    &
-        ithlp3_dp,    &
-        l_stats_samp
+        stats_metadata_type
 
     use clubb_precision, only: &
         core_rknd    ! Variable(s)
@@ -320,6 +326,9 @@ module advance_xp3_module
     logical, intent(in) :: &
       l_lmm_stepping    ! Apply Linear Multistep Method (LMM) Stepping
 
+    type (stats_metadata_type), intent(in) :: &
+      stats_metadata
+
     ! ----------------------- Input/Output Variable -----------------------
     type (stats), target, dimension(ngrdcol), intent(inout) :: &
       stats_zt
@@ -356,21 +365,21 @@ module advance_xp3_module
 
     ! ----------------------- Begin Code -----------------------
 
-    if ( l_stats_samp ) then
+    if ( stats_metadata%l_stats_samp ) then
 
       select case ( solve_type )
       case( xp3_rtp3 )
         ! Budget stats for rtp3
-        ixp3_bt = irtp3_bt
-        ixp3_tp = irtp3_tp
-        ixp3_ac = irtp3_ac
-        ixp3_dp = irtp3_dp
+        ixp3_bt = stats_metadata%irtp3_bt
+        ixp3_tp = stats_metadata%irtp3_tp
+        ixp3_ac = stats_metadata%irtp3_ac
+        ixp3_dp = stats_metadata%irtp3_dp
       case( xp3_thlp3 )
         ! Budget stats for thlp3
-        ixp3_bt = ithlp3_bt
-        ixp3_tp = ithlp3_tp
-        ixp3_ac = ithlp3_ac
-        ixp3_dp = ithlp3_dp
+        ixp3_bt = stats_metadata%ithlp3_bt
+        ixp3_tp = stats_metadata%ithlp3_tp
+        ixp3_ac = stats_metadata%ithlp3_ac
+        ixp3_dp = stats_metadata%ithlp3_dp
       case default
         ! Budgets aren't setup for the passive scalars
         ixp3_bt = 0
@@ -386,17 +395,17 @@ module advance_xp3_module
         end do
       end if ! l_predict_xp3
 
-    end if ! l_stats_samp
+    end if ! stats_metadata%l_stats_samp
 
     ! Initialize variables
     term_tp = zero
     term_ac = zero
 
     ! Interpolate <x> to momentum levels.
-    xm_zm = zt2zm( nz, ngrdcol, gr, xm )
+    xm_zm = zt2zm( nz, ngrdcol, gr, xm, zero_threshold )
 
     ! Interpolate <x'^2> to thermodynamic levels.
-    xp2_zt = max( zm2zt( nz, ngrdcol, gr, xp2 ), x_tol**2 )  ! Positive definite quantity
+    xp2_zt = zm2zt( nz, ngrdcol, gr, xp2, x_tol**2 )  ! Positive definite quantity
 
     do k = 2, nz-1, 1
       do i = 1, ngrdcol
@@ -443,7 +452,7 @@ module advance_xp3_module
     xp3(:,1) = zero
     xp3(:,nz) = zero
 
-    if ( l_stats_samp ) then
+    if ( stats_metadata%l_stats_samp ) then
       do i = 1, ngrdcol
         call stat_update_var( ixp3_tp, term_tp(i,:),  & ! intent(in)
                               stats_zt(i) )             ! intent(inout)
@@ -457,7 +466,7 @@ module advance_xp3_module
                                 stats_zt(i) )                 ! Intent(inout)
         end if ! l_predict_xp3
       end do
-    end if ! l_stats_samp
+    end if ! stats_metadata%l_stats_samp
 
     return
 

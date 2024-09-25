@@ -13,7 +13,8 @@ class VariableGroupTaus(VariableGroup):
     def __init__(self, case, clubb_datasets=None, sam_benchmark_dataset=None, coamps_benchmark_dataset=None,
                  wrf_benchmark_dataset=None, r408_dataset=None,
                  hoc_dataset=None, cam_datasets=None,
-                 e3sm_datasets=None, sam_datasets=None, wrf_datasets=None, priority_vars=False):
+                 e3sm_datasets=None, sam_datasets=None, wrf_datasets=None, priority_vars=False,
+                 background_rcm=False, background_rcm_folder=None):
         """
         """
         self.name = "tau variables"
@@ -33,6 +34,81 @@ class VariableGroupTaus(VariableGroup):
             },
             {'var_names':
                 {
+                'clubb': ['bv_freq_sqd_mixed'],
+                'sam': [],
+                'coamps': [],
+                'r408': ['bv_freq_sqd_mixed'],
+                'hoc': ['bv_freq_sqd_mixed'],
+                'e3sm': ['bv_freq_sqd_mixed'],
+                'cam': ['bv_freq_sqd_mixed'],
+                'wrf': ['bv_freq_sqd_mixed'],
+                },
+                'title': 'Mixed Brunt-Vaisala frequency squared',
+                'axis_title': 'bv_freq_sqd_mixed [$\mathrm{1/s^2}$]',
+                'sci_scale': 0,
+            },
+            {'var_names':
+                {
+                'clubb': ['bv_freq_sqd_moist'],
+                'sam': [],
+                'coamps': [],
+                'r408': ['bv_freq_sqd_moist'],
+                'hoc': ['bv_freq_sqd_moist'],
+                'e3sm': ['bv_freq_sqd_moist'],
+                'cam': ['bv_freq_sqd_moist'],
+                'wrf': ['bv_freq_sqd_moist'],
+                },
+                'title': 'Brunt-Vaisala frequency squared in moist air',
+                'axis_title': 'bv_freq_sqd_moist [$\mathrm{1/s^2}$]',
+                'sci_scale': 0,
+            },
+            {'var_names':
+                {
+                'clubb': ['bv_freq_sqd_dry'],
+                'sam': [],
+                'coamps': [],
+                'r408': ['bv_freq_sqd_dry'],
+                'hoc': ['bv_freq_sqd_dry'],
+                'e3sm': ['bv_freq_sqd_dry'],
+                'cam': ['bv_freq_sqd_dry'],
+                'wrf': ['bv_freq_sqd_dry'],
+                },
+                'title': 'Brunt-Vaisala frequency squared in dry air',
+                'axis_title': 'bv_freq_sqd_dry [$\mathrm{1/s^2}$]',
+                'sci_scale': 0,
+            },
+            {'var_names':
+                {
+                'clubb': ['bv_freq_pos'],
+                'sam': [],
+                'coamps': [],
+                'r408': ['bv_freq_pos'],
+                'hoc': ['bv_freq_pos'],
+                'e3sm': ['bv_freq_pos'],
+                'cam': ['bv_freq_pos'],
+                'wrf': ['bv_freq_pos'],
+                },
+                'title': 'Positive part of Brunt-Vaisala frequency',
+                'axis_title': 'bv_freq_pos [$\mathrm{1/s}$]',
+                'sci_scale': 0,
+            },
+            {'var_names':
+                {
+                'clubb': ['bv_freq_out_cloud'],
+                'sam': [],
+                'coamps': [],
+                'r408': ['bv_freq_out_cloud'],
+                'hoc': ['bv_freq_out_cloud'],
+                'e3sm': ['bv_freq_out_cloud'],
+                'cam': ['bv_freq_out_cloud'],
+                'wrf': ['bv_freq_out_cloud'],
+                },
+                'title': 'Out-of-cloud part of Brunt-Vaisala frequency',
+                'axis_title': 'bv_freq_out_cloud [$\mathrm{1/s}$]',
+                'sci_scale': 0,
+            },
+            {'var_names':
+                {
                 'clubb': ['Kh_zm'],
                 'sam': ['KH_ZM'],
                 'coamps': ['Kh_zm'],
@@ -41,6 +117,19 @@ class VariableGroupTaus(VariableGroup):
                 'e3sm': ['Kh_zm'],
                 'cam': ['Kh_zm'],
                 'wrf': ['Kh_zm'],
+                },
+             'sci_scale': 0,
+            },
+            {'var_names':
+                {
+                'clubb': ['Ri_zm'],
+                'sam': ['RI_ZM'],       # Dummy
+                'coamps': ['Ri_zm'],    # Dummy
+                'r408': ['Ri_zm'],      # Dummy
+                'hoc': ['Ri_zm'],       # Dummy
+                'e3sm': ['Ri_zm'],      # Dummy
+                'cam': ['Ri_zm'],       # Dummy
+                'wrf': ['Ri_zm'],       # Dummy
                 },
              'sci_scale': 0,
             },
@@ -122,7 +211,75 @@ class VariableGroupTaus(VariableGroup):
                 },
              'sci_scale': 0,
             },
-
+            {'var_names':
+                {
+                'clubb': ['C6_term'],
+                'sam': ['C6_TERM'], # Dummy
+                'coamps': ['C6_term'], # Dummy
+                'r408': ['C6_term'], # Dummy
+                'hoc': ['C6_term'], # Dummy
+                'e3sm': ['C6_term'], # Dummy
+                'cam': ['C6_term'], # Dummy
+                'wrf': ['C6_term'], # Dummy
+                },
+             'sci_scale': 0,
+            },
+            {'var_names':
+                {
+                'clubb': ['C1_Skw_fnc'],
+                'sam': ['C1_SKW_FNC'], # Dummy
+                'coamps': ['C1_Skw_fnc'], # Dummy
+                'r408': ['C1_Skw_fnc'], # Dummy
+                'hoc': ['C1_Skw_fnc'], # Dummy
+                'e3sm': ['C1_Skw_fnc'], # Dummy
+                'cam': ['C1_Skw_fnc'], # Dummy
+                'wrf': ['C1_Skw_fnc'], # Dummy
+                },
+                'title': 'C1_Skw_fnc',
+                'sci_scale': 0,
+            },
+            {'var_names':
+                {
+                'clubb': ['C6rt_Skw_fnc'],
+                'sam': ['C6RT_SKW_FNC'], # Dummy
+                'coamps': ['C6rt_Skw_fnc'], # Dummy
+                'r408': ['C6rt_Skw_fnc'], # Dummy
+                'hoc': ['C6rt_Skw_fnc'], # Dummy
+                'e3sm': ['C6rt_Skw_fnc'], # Dummy
+                'cam': ['C6rt_Skw_fnc'], # Dummy
+                'wrf': ['C6rt_Skw_fnc'], # Dummy
+                },
+                'title': 'C6rt_Skw_fnc',
+                'sci_scale': 0,
+            },
+            {'var_names':
+                {
+                'clubb': ['C6thl_Skw_fnc'],
+                'sam': ['C6THL_SKW_FNC'], # Dummy
+                'coamps': ['C6thl_Skw_fnc'], # Dummy
+                'r408': ['C6thl_Skw_fnc'], # Dummy
+                'hoc': ['C6thl_Skw_fnc'], # Dummy
+                'e3sm': ['C6thl_Skw_fnc'], # Dummy
+                'cam': ['C6thl_Skw_fnc'], # Dummy
+                'wrf': ['C6thl_Skw_fnc'], # Dummy
+                },
+                'title': 'C6thl_Skw_fnc',
+                'sci_scale': 0,
+            },
+            {'var_names':
+                {
+                'clubb': ['C7_Skw_fnc'],
+                'sam': ['C7_SKW_FNC'], # Dummy
+                'coamps': ['C7_Skw_fnc'], # Dummy
+                'r408': ['C7_Skw_fnc'], # Dummy
+                'hoc': ['C7_Skw_fnc'], # Dummy
+                'e3sm': ['C7_Skw_fnc'], # Dummy
+                'cam': ['C7_Skw_fnc'], # Dummy
+                'wrf': ['C7_Skw_fnc'], # Dummy
+                },
+                'title': 'C7_Skw_fnc',
+                'sci_scale': 0,
+            },
         ]
 
         # Call ctor of parent class
@@ -130,4 +287,5 @@ class VariableGroupTaus(VariableGroup):
                          coamps_benchmark_dataset=coamps_benchmark_dataset,wrf_benchmark_dataset=wrf_benchmark_dataset,
                          r408_dataset=r408_dataset, hoc_dataset=hoc_dataset, e3sm_datasets=e3sm_datasets,
                          cam_datasets=cam_datasets, sam_datasets=sam_datasets, wrf_datasets=wrf_datasets,
-                         priority_vars=priority_vars)
+                         priority_vars=priority_vars, background_rcm=background_rcm,
+                         background_rcm_folder=background_rcm_folder)

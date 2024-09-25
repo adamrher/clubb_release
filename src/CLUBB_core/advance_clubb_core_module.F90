@@ -1,6 +1,3 @@
-!-----------------------------------------------------------------------
-! $sId$ 
-!-----------------------------------------------------------------------
 
 module advance_clubb_core_module
 
@@ -23,7 +20,7 @@ module advance_clubb_core_module
 !                   should include this notice.
 !
 !   Portions of this code derived from other sources (Hugh Morrison,
-!   ACM TOMS, Numerical Recipes, et cetera) are the intellectual
+!   ACM TOMS, et cetera) are the intellectual
 !   property of their respective authors as noted and are also subject
 !   to copyright.
 !
@@ -92,13 +89,18 @@ module advance_clubb_core_module
   use model_flags, only: &
       ipdf_pre_advance_fields, &      ! Call before advancing predictive fields
       ipdf_post_advance_fields, &     ! Call after advancing predictive fields
-      ipdf_pre_post_advance_fields    ! Call both before and after advancing
+      ipdf_pre_post_advance_fields, & ! Call both before and after advancing
                                       ! predictive fields
+      saturation_bolton, &
+      saturation_gfdl, &
+      saturation_flatau, &
+      saturation_lookup
+                             
 
   implicit none
 
   public ::  &
-    setup_clubb_core, &
+    check_clubb_settings, &
     advance_clubb_core, &
     cleanup_clubb_core, &
     set_Lscale_max, &
@@ -124,8 +126,10 @@ module advance_clubb_core_module
   ! and GFDL.
   !#######################################################################
   !#######################################################################
-  subroutine advance_clubb_core ( gr, nz, ngrdcol, &                ! intent(in)
-               l_implemented, dt, fcor, sfc_elevation, hydromet_dim, & ! intent(in)
+  subroutine advance_clubb_core( gr, nz, ngrdcol, &                 ! intent(in)
+               l_implemented, dt, fcor, sfc_elevation,            & ! intent(in)
+               hydromet_dim,                                      & ! intent(in)
+               sclr_dim, sclr_tol, edsclr_dim, sclr_idx,      & ! intent(in)
                thlm_forcing, rtm_forcing, um_forcing, vm_forcing, & ! intent(in)
                sclrm_forcing, edsclrm_forcing, wprtp_forcing, &     ! intent(in)
                wpthlp_forcing, rtp2_forcing, thlp2_forcing, &       ! intent(in)
@@ -137,7 +141,7 @@ module advance_clubb_core_module
                p_in_Pa, rho_zm, rho, exner, &                       ! intent(in)
                rho_ds_zm, rho_ds_zt, invrs_rho_ds_zm, &             ! intent(in)
                invrs_rho_ds_zt, thv_ds_zm, thv_ds_zt, &             ! intent(in)
-               hydromet, &                                          ! Unused
+               hydromet, l_mix_rat_hm, &                            ! intent(in)
                rfrzm, radf, &                                       ! intent(in)
 #ifdef CLUBBND_CAM
                varmu, &                                             ! intent(in)
@@ -146,6 +150,7 @@ module advance_clubb_core_module
                host_dx, host_dy, &                                  ! intent(in)
                clubb_params, nu_vert_res_dep, lmin, &               ! intent(in)
                clubb_config_flags, &                                ! intent(in)
+               stats_metadata, &                                    ! intent(in)
                stats_zt, stats_zm, stats_sfc, &                     ! intent(inout)
                um, vm, upwp, vpwp, up2, vp2, up3, vp3, &            ! intent(inout)
                thlm, rtm, wprtp, wpthlp, &                          ! intent(inout)
@@ -159,7 +164,7 @@ module advance_clubb_core_module
                rcm, cloud_frac, &                                   ! intent(inout)
                wpthvp, wp2thvp, rtpthvp, thlpthvp, &                ! intent(inout)
                sclrpthvp, &                                         ! intent(inout)
-               wp2rtp, wp2thlp, uprcp, vprcp, rc_coef, wp4, &       ! intent(inout)
+               wp2rtp, wp2thlp, uprcp, vprcp, rc_coef_zm, wp4, &    ! intent(inout)
                wpup2, wpvp2, wp2up2, wp2vp2, ice_supersat_frac, &   ! intent(inout)
                um_pert, vm_pert, upwp_pert, vpwp_pert, &            ! intent(inout)
                pdf_params, pdf_params_zm, &                         ! intent(inout)
@@ -221,25 +226,17 @@ module advance_clubb_core_module
         ixp3_coef_base,          &
         ixp3_coef_slope,         &
         ilambda0_stability_coef, &
-        ibeta,                   &
-        iSkw_denom_coef,         &
-        iSkw_max_mag,            &
         iup2_sfc_coef,           &
+        ia_const,                &
         ia3_coef_min,            &
         ibv_efold
 
     use parameters_tunable, only: &
         nu_vertical_res_dep    ! Type(s)
 
-    use parameters_model, only: &
-        sclr_dim, & ! Variable(s)
-        edsclr_dim, &
-        sclr_tol
-
     use model_flags, only: &
         clubb_config_flags_type, & ! Type
-        l_host_applies_sfc_fluxes, & ! Variable(s)
-        l_gamma_Skw, &
+        l_gamma_Skw, & ! Variable(s)
         l_advance_xp3, &
         iiPDF_ADG1
 
@@ -276,7 +273,6 @@ module advance_clubb_core_module
         calc_sfc_varnce ! Procedure
 
     use mixing_length, only: &
-        compute_mixing_length, &    ! Procedure
         calc_Lscale_directly,  &  ! for Lscale
         diagnose_Lscale_from_tau  ! for Lscale from tau
 
@@ -330,61 +326,6 @@ module advance_clubb_core_module
         stat_end_update,      &
         stat_end_update_pt
 
-    use stats_variables, only: &
-        irtp2_bt,      & ! Variable(s)
-        ithlp2_bt,     &
-        irtpthlp_bt,   &
-        iwp2_bt,       &
-        iwp3_bt,       &
-        ivp2_bt,       &
-        iup2_bt,       &
-        iwprtp_bt,     &
-        iwpthlp_bt,    &
-        iupwp_bt,      &
-        ivpwp_bt,      &
-        irtm_bt,       &
-        ithlm_bt,      &
-        ivm_bt,        &
-        ium_bt,        &
-        irvm,          &
-        irel_humidity, &
-        iwpthlp_zt
-
-    use stats_variables, only: &
-        iinvrs_tau_zm,           & ! Variable(s)
-        iinvrs_tau_xp2_zm,       &
-        iinvrs_tau_wp2_zm,       &
-        iinvrs_tau_wpxp_zm,      &
-        iinvrs_tau_wp3_zm,       &
-        iinvrs_tau_no_N2_zm,     &
-        iinvrs_tau_bkgnd,        &
-        iinvrs_tau_sfc,          &
-        iinvrs_tau_shear,        &
-        ibrunt_vaisala_freq_sqd, &
-        ibrunt_vaisala_freq_sqd_splat, &
-        isqrt_Ri_zm
-
-    use stats_variables, only: &
-        iwprtp_zt,     &
-        iup2_zt,       &
-        ivp2_zt,       &
-        iupwp_zt,      &
-        ivpwp_zt,      &
-        ithlp2_sf,     &
-        irtp2_sf,      &
-        irtpthlp_sf,   &
-        iup2_sf,       &
-        ivp2_sf,       &
-        iwp2_sf,       &
-        l_stats_samp,  &
-        l_stats,       &
-        irtm_spur_src, &
-        ithlm_spur_src
-
-    use stats_variables, only: &
-        irfrzm, & ! Variable(s)
-        istability_correction
-
     use fill_holes, only: &
         fill_holes_vertical
 
@@ -406,6 +347,12 @@ module advance_clubb_core_module
       copy_single_pdf_params_to_multi, &
       copy_multi_pdf_params_to_single, &
       init_pdf_params
+
+    use stats_variables, only: &
+      stats_metadata_type
+
+    use array_index, only: &
+      sclr_idx_type
 
     implicit none
 
@@ -441,7 +388,15 @@ module advance_clubb_core_module
       sfc_elevation     ! Elevation of ground level    [m above MSL]
 
     integer, intent(in) :: &
-      hydromet_dim      ! Total number of hydrometeor species        [#]
+      hydromet_dim,   & ! Total number of hydrometeor species       [#]
+      sclr_dim,       & ! Number of passive scalars                 [#]
+      edsclr_dim        ! Number of eddy-diff. passive scalars      [#]
+
+    real( kind = core_rknd ), intent(in), dimension(sclr_dim) :: & 
+      sclr_tol          ! Threshold(s) on the passive scalars  [units vary]
+
+    type (sclr_idx_type), intent(in) :: &
+      sclr_idx
 
     real( kind = core_rknd ), intent(in), dimension(ngrdcol,nz) ::  &
       thlm_forcing,    & ! liquid potential temp. forcing (thermodynamic levels)    [K/s]
@@ -467,6 +422,9 @@ module advance_clubb_core_module
 
     real( kind = core_rknd ), dimension(ngrdcol,nz,hydromet_dim), intent(in) :: &
       hydromet           ! Array of hydrometeors                [units vary]
+
+    logical, dimension(hydromet_dim), intent(in) :: &
+      l_mix_rat_hm   ! if true, then the quantity is a hydrometeor mixing ratio
 
     real( kind = core_rknd ), dimension(ngrdcol,nz), intent(in) :: &
       radf          ! Buoyancy production at cloud top due to longwave radiative cooling [m^2/s^3]
@@ -520,7 +478,7 @@ module advance_clubb_core_module
       host_dx,  & ! East-west horizontal grid spacing     [m]
       host_dy     ! North-south horizontal grid spacing   [m]
 
-    real( kind = core_rknd ), dimension(nparams), intent(in) :: &
+    real( kind = core_rknd ), dimension(ngrdcol,nparams), intent(in) :: &
       clubb_params    ! Array of CLUBB's tunable parameters    [units vary]
 
     type(nu_vertical_res_dep), intent(in) :: &
@@ -531,6 +489,9 @@ module advance_clubb_core_module
 
     type( clubb_config_flags_type ), intent(in) :: &
       clubb_config_flags ! Derived type holding all configurable CLUBB flags
+
+    type (stats_metadata_type), intent(in) :: &
+      stats_metadata
 
     !--------------------------- Input/Output Variables ---------------------------
     type (stats), target, intent(inout), dimension(ngrdcol) :: &
@@ -589,7 +550,7 @@ module advance_clubb_core_module
       wp2thlp,           & ! w'^2 thl' (thermodynamic levels)     [m^2/s^2 K]
       uprcp,             & ! < u' r_c' > (momentum levels)        [(m/s)(kg/kg)]
       vprcp,             & ! < v' r_c' > (momentum levels)        [(m/s)(kg/kg)]
-      rc_coef,           & ! Coef of X'r_c' in Eq. (34) (t-levs.) [K/(kg/kg)]
+      rc_coef_zm,        & ! Coef of X'r_c' in Eq. (34) (m-levs.) [K/(kg/kg)]
       wp4,               & ! w'^4 (momentum levels)               [m^4/s^4]
       wpup2,             & ! w'u'^2 (thermodynamic levels)        [m^3/s^3]
       wpvp2,             & ! w'v'^2 (thermodynamic levels)        [m^3/s^3]
@@ -729,7 +690,7 @@ module advance_clubb_core_module
 
     ! Eric Raut declared this variable solely for output to disk
     real( kind = core_rknd ), dimension(ngrdcol,nz) :: &
-      rc_coef_zm    ! Coefficient of X'r_c' in Eq. (34) on m-levs.  [K/(kg/kg)]
+      rc_coef    ! Coefficient of X'r_c' in Eq. (34) on t-levs.  [K/(kg/kg)]
 
     real( kind = core_rknd ), dimension(ngrdcol,nz) :: &
       Km_zm, & ! Eddy diffusivity for momentum on zm grid levels [m^2/s]
@@ -811,17 +772,16 @@ module advance_clubb_core_module
        invrs_tau_wp3_zt,             & ! Inverse tau wp3 at zt levels
        Cx_fnc_Richardson,            & ! Cx_fnc computed from Richardson_num          [-]
        brunt_vaisala_freq_sqd,       & ! Buoyancy frequency squared, N^2              [s^-2]
-       brunt_vaisala_freq_sqd_mixed, & ! A mixture of dry and moist N^2
-       brunt_vaisala_freq_sqd_dry,   & ! dry N^2
-       brunt_vaisala_freq_sqd_moist, & ! moist N^2
-       brunt_vaisala_freq_sqd_splat, &
+       brunt_vaisala_freq_sqd_mixed, & ! A mixture of dry and moist N^2               [s^-2]
+       brunt_vaisala_freq_sqd_dry,   & ! dry N^2                                      [s^-2]
+       brunt_vaisala_freq_sqd_moist, & ! moist N^2                                    [s^-2]
+       brunt_vaisala_freq_sqd_splat, & !                                              [s^-2]
        brunt_vaisala_freq_sqd_zt,    & ! Buoyancy frequency squared on t-levs.        [s^-2]
-       sqrt_Ri_zm                      ! square root of Richardson number
+       Ri_zm                           ! Richardson number                            [-]
 
 
     real( kind = core_rknd ), parameter :: &
-       ufmin = 0.01_core_rknd,       & ! minimum value of friction velocity     [m/s]
-       z_displace = 10.0_core_rknd   ! displacement of log law profile above ground   [m]
+       ufmin = 0.01_core_rknd           ! minimum value of friction velocity     [m/s]
 
     real( kind = core_rknd ), dimension(ngrdcol) :: &
       Lscale_max    ! Max. allowable mixing length (based on grid box size) [m]
@@ -830,25 +790,16 @@ module advance_clubb_core_module
       tau_max_zm, & ! Max. allowable eddy dissipation time scale on m-levs  [s]
       tau_max_zt    ! Max. allowable eddy dissipation time scale on t-levs  [s]
 
-    real( kind = core_rknd ), dimension(ngrdcol) :: newmu
+    real( kind = core_rknd ) :: &
+      below_grnd_val = 0.01_core_rknd
 
-    real( kind = core_rknd ) :: below_grnd_val = 0.01_core_rknd
+    real( kind = core_rknd ), dimension(ngrdcol) :: &
+      mu
 
     real( kind = core_rknd ) :: &
-      taumax,         & ! CLUBB tunable parameter taumax
-      c_K,            & ! CLUBB tunable parameter c_K
       gamma_coef,     & ! CLUBB tunable parameter gamma_coef
       gamma_coefb,    & ! CLUBB tunable parameter gamma_coefb
-      gamma_coefc,    & ! CLUBB tunable parameter gamma_coefc
-      xp3_coef_base,  & ! CLUBB tunable parameter xp3_coef_base
-      xp3_coef_slope, & ! CLUBB tunable parameter xp3_coef_slope
-      beta,           & ! CLUBB tunable parameter beta
-      Skw_denom_coef, & ! CLUBB tunable parameter Skw_denom_coef
-      Skw_max_mag,    & ! CLUBB tunable parameter Skw_max_mag
-      mu, &
-      a3_coef_min, &
-      C_K10, &
-      C_K10h
+      gamma_coefc       ! CLUBB tunable parameter gamma_coefc
 
     ! Flag to sample stats in a particular call to subroutine
     ! pdf_closure_driver.
@@ -885,94 +836,13 @@ module advance_clubb_core_module
 
     !----- Begin Code -----
 
-    !$acc data copyin( gr, gr%zm, gr%zt, gr%dzm, gr%dzt, gr%invrs_dzt, gr%invrs_dzm, &
-    !$acc              gr%weights_zt2zm, gr%weights_zm2zt, &
-    !$acc              nu_vert_res_dep, nu_vert_res_dep%nu2, nu_vert_res_dep%nu9, &
-    !$acc              nu_vert_res_dep%nu1, nu_vert_res_dep%nu8, nu_vert_res_dep%nu10, &
-    !$acc              nu_vert_res_dep%nu6, &
-    !$acc              pdf_params, pdf_params_zm, &
-    !$acc              fcor, sfc_elevation, thlm_forcing, rtm_forcing, um_forcing, &
-    !$acc              vm_forcing, wprtp_forcing, wpthlp_forcing, rtp2_forcing, thlp2_forcing, &
-    !$acc              rtpthlp_forcing, wm_zm, wm_zt, rho_zm, rho, rho_ds_zm, rho_ds_zt, &
-    !$acc              invrs_rho_ds_zm, invrs_rho_ds_zt, thv_ds_zm, thv_ds_zt, rfrzm, &
-    !$acc              radf, wpthlp_sfc, &
-    !$acc              wprtp_sfc, upwp_sfc, vpwp_sfc, sclrm_forcing, wpsclrp_sfc, edsclrm_forcing, & 
-    !$acc              wpedsclrp_sfc, upwp_sfc_pert, vpwp_sfc_pert, rtm_ref, thlm_ref, um_ref, &
-#ifdef CLUBBND_CAM
-    !$acc              varmu, &
-#endif
-    !$acc              vm_ref, ug, vg, host_dx, host_dy ) &
-    !$acc        copy( um, upwp, vm, vpwp, up2, vp2, up3, vp3, rtm, wprtp, thlm, wpthlp, rtp2, &
-    !$acc              rtp3, thlp2, thlp3, rtpthlp, wp2, wp3, sclrm, wpsclrp, sclrp2, sclrp3, &
-    !$acc              sclrprtp, sclrpthlp, p_in_Pa, exner, rcm, cloud_frac, wpthvp, wp2thvp, &
-    !$acc              rtpthvp, thlpthvp, sclrpthvp, wp2rtp, wp2thlp, uprcp, vprcp, rc_coef, &
-    !$acc              wp4, wpup2, wpvp2, wp2up2, wp2vp2, ice_supersat_frac, um_pert, &
-    !$acc              vm_pert, upwp_pert, vpwp_pert, &
-#ifdef GFDL
-    !$acc              sclrm_trsport_only, &
-#endif
-    !$acc              edsclrm, &
-    !$acc              pdf_params%w_1, pdf_params%w_2, &
-    !$acc              pdf_params%varnce_w_1, pdf_params%varnce_w_2, &
-    !$acc              pdf_params%rt_1, pdf_params%rt_2, &
-    !$acc              pdf_params%varnce_rt_1, pdf_params%varnce_rt_2,  &
-    !$acc              pdf_params%thl_1, pdf_params%thl_2, &
-    !$acc              pdf_params%varnce_thl_1, pdf_params%varnce_thl_2, &
-    !$acc              pdf_params%corr_w_rt_1, pdf_params%corr_w_rt_2,  &
-    !$acc              pdf_params%corr_w_thl_1, pdf_params%corr_w_thl_2, &
-    !$acc              pdf_params%corr_rt_thl_1, pdf_params%corr_rt_thl_2,&
-    !$acc              pdf_params%alpha_thl, pdf_params%alpha_rt, &
-    !$acc              pdf_params%crt_1, pdf_params%crt_2, pdf_params%cthl_1, &
-    !$acc              pdf_params%cthl_2, pdf_params%chi_1, &
-    !$acc              pdf_params%chi_2, pdf_params%stdev_chi_1, &
-    !$acc              pdf_params%stdev_chi_2, pdf_params%stdev_eta_1, &
-    !$acc              pdf_params%stdev_eta_2, pdf_params%covar_chi_eta_1, &
-    !$acc              pdf_params%covar_chi_eta_2, pdf_params%corr_w_chi_1, &
-    !$acc              pdf_params%corr_w_chi_2, pdf_params%corr_w_eta_1, &
-    !$acc              pdf_params%corr_w_eta_2, pdf_params%corr_chi_eta_1, &
-    !$acc              pdf_params%corr_chi_eta_2, pdf_params%rsatl_1, &
-    !$acc              pdf_params%rsatl_2, pdf_params%rc_1, pdf_params%rc_2, &
-    !$acc              pdf_params%cloud_frac_1, pdf_params%cloud_frac_2,  &
-    !$acc              pdf_params%mixt_frac, pdf_params%ice_supersat_frac_1, &
-    !$acc              pdf_params%ice_supersat_frac_2, &
-    !$acc              pdf_params_zm%w_1, pdf_params_zm%w_2, &
-    !$acc              pdf_params_zm%varnce_w_1, pdf_params_zm%varnce_w_2, &
-    !$acc              pdf_params_zm%rt_1, pdf_params_zm%rt_2, &
-    !$acc              pdf_params_zm%varnce_rt_1, pdf_params_zm%varnce_rt_2,  &
-    !$acc              pdf_params_zm%thl_1, pdf_params_zm%thl_2, &
-    !$acc              pdf_params_zm%varnce_thl_1, pdf_params_zm%varnce_thl_2, &
-    !$acc              pdf_params_zm%corr_w_rt_1, pdf_params_zm%corr_w_rt_2,  &
-    !$acc              pdf_params_zm%corr_w_thl_1, pdf_params_zm%corr_w_thl_2, &
-    !$acc              pdf_params_zm%corr_rt_thl_1, pdf_params_zm%corr_rt_thl_2,&
-    !$acc              pdf_params_zm%alpha_thl, pdf_params_zm%alpha_rt, &
-    !$acc              pdf_params_zm%crt_1, pdf_params_zm%crt_2, pdf_params_zm%cthl_1, &
-    !$acc              pdf_params_zm%cthl_2, pdf_params_zm%chi_1, &
-    !$acc              pdf_params_zm%chi_2, pdf_params_zm%stdev_chi_1, &
-    !$acc              pdf_params_zm%stdev_chi_2, pdf_params_zm%stdev_eta_1, &
-    !$acc              pdf_params_zm%stdev_eta_2, pdf_params_zm%covar_chi_eta_1, &
-    !$acc              pdf_params_zm%covar_chi_eta_2, pdf_params_zm%corr_w_chi_1, &
-    !$acc              pdf_params_zm%corr_w_chi_2, pdf_params_zm%corr_w_eta_1, &
-    !$acc              pdf_params_zm%corr_w_eta_2, pdf_params_zm%corr_chi_eta_1, &
-    !$acc              pdf_params_zm%corr_chi_eta_2, pdf_params_zm%rsatl_1, &
-    !$acc              pdf_params_zm%rsatl_2, pdf_params_zm%rc_1, pdf_params_zm%rc_2, &
-    !$acc              pdf_params_zm%cloud_frac_1, pdf_params_zm%cloud_frac_2,  &
-    !$acc              pdf_params_zm%mixt_frac, pdf_params_zm%ice_supersat_frac_1, &
-    !$acc              pdf_params_zm%ice_supersat_frac_2 ) &
-    !$acc     copyout( rcm_in_layer, cloud_cover, wprcp, w_up_in_cloud, w_down_in_cloud, &
-    !$acc              cloudy_updraft_frac, cloudy_downdraft_frac, invrs_tau_zm, Kh_zt, &
-    !$acc              Kh_zm, &
-#ifdef CLUBB_CAM
-    !$acc              qclvar, &
-#endif
-    !$acc              thlprcp )
-
     !$acc enter data create( Skw_zm, Skw_zt, thvm, thvm_zm, ddzm_thvm_zm, rtprcp, rcp2, &
     !$acc              wpthlp2, wprtp2, wprtpthlp, wp2rcp, wp3_zm, Lscale, Lscale_up, Lscale_zm, &
     !$acc              Lscale_down, em, tau_zm, tau_zt, &
     !$acc              wp2_zt, thlp2_zt, wpthlp_zt, &
     !$acc              wprtp_zt, rtp2_zt, rtpthlp_zt, up2_zt, vp2_zt, upwp_zt, vpwp_zt, &
     !$acc              Skw_velocity, a3_coef, a3_coef_zt, wp3_on_wp2, wp3_on_wp2_zt, &
-    !$acc              rc_coef_zm, Km_zm, Kmh_zm, gamma_Skw_fnc, sigma_sqd_w, sigma_sqd_w_tmp, sigma_sqd_w_zt, &
+    !$acc              rc_coef, Km_zm, Kmh_zm, gamma_Skw_fnc, sigma_sqd_w, sigma_sqd_w_tmp, sigma_sqd_w_zt, &
     !$acc              sqrt_em_zt, xp3_coef_fnc, w_1_zm, w_2_zm, varnce_w_1_zm, varnce_w_2_zm, &
     !$acc              mixt_frac_zm, rcp2_zt, cloud_frac_zm, ice_supersat_frac_zm, rtm_zm, &
     !$acc              thlm_zm, rcm_zm, thlm1000, thlm700, &
@@ -983,16 +853,16 @@ module advance_clubb_core_module
     !$acc              invrs_tau_sfc, invrs_tau_zt, invrs_tau_wp3_zt, Cx_fnc_Richardson, &
     !$acc              brunt_vaisala_freq_sqd, brunt_vaisala_freq_sqd_mixed, &
     !$acc              brunt_vaisala_freq_sqd_dry, brunt_vaisala_freq_sqd_moist, &
-    !$acc              brunt_vaisala_freq_sqd_plus, brunt_vaisala_freq_sqd_splat, &
-    !$acc              brunt_vaisala_freq_sqd_zt, sqrt_Ri_zm, Lscale_max, &
-    !$acc              tau_max_zm, tau_max_zt, newmu, lhs_splat_wp2, lhs_splat_wp3 )
+    !$acc              brunt_vaisala_freq_sqd_splat, &
+    !$acc              brunt_vaisala_freq_sqd_zt, Ri_zm, Lscale_max, &
+    !$acc              tau_max_zm, tau_max_zt, mu, lhs_splat_wp2, lhs_splat_wp3 )
 
     !$acc enter data if( sclr_dim > 0 ) &
-    !$acc            create( wpedsclrp, sclrprcp, wp2sclrp, &
+    !$acc            create( sclrprcp, wp2sclrp, &
     !$acc                    wpsclrp2, wpsclrprtp, wpsclrpthlp, wpsclrp_zt, sclrp2_zt )
 
-    !$acc enter data if( sclr_dim > 0 ) &
-    !$acc            create( hydromet, wphydrometp, wp2hmp, rtphmp_zt, thlphmp_zt )
+    !$acc enter data if( edsclr_dim > 0 ) &
+    !$acc            create( wpedsclrp )
 
     if ( clubb_config_flags%l_lmm_stepping ) then
       dt_advance = two * dt
@@ -1002,16 +872,11 @@ module advance_clubb_core_module
 
     err_code_out = clubb_no_error  ! Initialize to no error value
 
-    mu = clubb_params(imu)
-    a3_coef_min = clubb_params(ia3_coef_min)
-    C_K10  = clubb_params(ic_K10)
-    C_K10h = clubb_params(ic_K10h)
-
     ! Determine the maximum allowable value for Lscale (in meters).
     call set_Lscale_max( ngrdcol, l_implemented, host_dx, host_dy, & ! intent(in)
                          Lscale_max )                                ! intent(out)
 
-    if ( l_stats .and. l_stats_samp ) then
+    if ( stats_metadata%l_stats .and. stats_metadata%l_stats_samp ) then
 
       !$acc update host( wm_zt, wm_zm, rho_ds_zt, rtm, gr%dzt, &
       !$acc              rtm, thlm )
@@ -1045,13 +910,18 @@ module advance_clubb_core_module
       !$acc              rho_ds_zt, invrs_rho_ds_zm, invrs_rho_ds_zt, thv_ds_zm, &
       !$acc              thv_ds_zt, wpthlp_sfc, wprtp_sfc, upwp_sfc, vpwp_sfc, &
       !$acc              um, upwp, vm, vpwp, up2, vp2, rtm, wprtp, thlm, wpthlp, &
-      !$acc              wp2, wp3, rtp2, thlp2, rtpthlp, wpsclrp_sfc, wpedsclrp_sfc, &
-      !$acc              sclrm, wpsclrp, sclrp2, sclrprtp, sclrpthlp, sclrm_forcing, &
-      !$acc              edsclrm, edsclrm_forcing )
+      !$acc              wp2, wp3, rtp2, thlp2, rtpthlp )
+
+      !$acc update host( wpsclrp_sfc, wpedsclrp_sfc, sclrm, wpsclrp, &
+      !$acc              sclrp2, sclrprtp, sclrpthlp, sclrm_forcing ) &
+      !$acc if ( sclr_dim > 0 )
+
+      !$acc update host( edsclrm, edsclrm_forcing  ) if ( edsclr_dim > 0 )
 
       do i = 1, ngrdcol
-        call parameterization_check &
-             ( nz, thlm_forcing(i,:), rtm_forcing(i,:), um_forcing(i,:),                         & ! intent(in)
+        call parameterization_check( &
+               nz, sclr_dim, edsclr_dim, &
+               thlm_forcing(i,:), rtm_forcing(i,:), um_forcing(i,:),                         & ! intent(in)
                vm_forcing(i,:), wm_zm(i,:), wm_zt(i,:), p_in_Pa(i,:),                                 & ! intent(in)
                rho_zm(i,:), rho(i,:), exner(i,:), rho_ds_zm(i,:),                                     & ! intent(in)
                rho_ds_zt(i,:), invrs_rho_ds_zm(i,:), invrs_rho_ds_zt(i,:),                       & ! intent(in)
@@ -1069,20 +939,20 @@ module advance_clubb_core_module
       if ( err_code == clubb_fatal_error ) then
         write(fstderr,*) "Fatal error when testing input"
         err_code_out = err_code
-        !return
+        return
       end if
 
     end if
     !-----------------------------------------------------------------------
 
-    if ( l_stats_samp ) then
+    if ( stats_metadata%l_stats_samp ) then
 
       !$acc update host( rfrzm, wp2, vp2, up2, wprtp, wpthlp, upwp, vpwp, &
       !$acc              rtp2, thlp2, rtpthlp, rtm, thlm, um, vm, wp3 )
 
       do i = 1, ngrdcol
 
-        call stat_update_var( irfrzm, rfrzm(i,:), & ! intent(in)
+        call stat_update_var( stats_metadata%irfrzm, rfrzm(i,:), & ! intent(in)
                               stats_zt(i) ) ! intent(inout)
 
       ! Set up budget stats variables.
@@ -1090,42 +960,42 @@ module advance_clubb_core_module
         !print *, "B stats_zt(i)%accum_field_values", stats_zt(i)%accum_field_values
         !print *, "wp2(i,:) = ", wp2(i,:)
 
-         call stat_begin_update( nz, iwp2_bt, wp2(i,:) / dt, & ! intent(in)
+         call stat_begin_update( nz, stats_metadata%iwp2_bt, wp2(i,:) / dt, & ! intent(in)
                                  stats_zm(i) )           ! intent(inout)
                                  
          !print *, "A stats_zt(i)%accum_field_values", stats_zt(i)%accum_field_values
                                  
                                  
-         call stat_begin_update( nz, ivp2_bt, vp2(i,:) / dt, & ! intent(in)
+         call stat_begin_update( nz, stats_metadata%ivp2_bt, vp2(i,:) / dt, & ! intent(in)
                                  stats_zm(i) )           ! intent(inout)
-         call stat_begin_update( nz, iup2_bt, up2(i,:) / dt, & ! intent(in)
+         call stat_begin_update( nz, stats_metadata%iup2_bt, up2(i,:) / dt, & ! intent(in)
                                  stats_zm(i) )           ! intent(inout)
-         call stat_begin_update( nz, iwprtp_bt, wprtp(i,:) / dt, & ! intent(in)
+         call stat_begin_update( nz, stats_metadata%iwprtp_bt, wprtp(i,:) / dt, & ! intent(in)
                                  stats_zm(i) )               ! intent(inout)
-         call stat_begin_update( nz, iwpthlp_bt, wpthlp(i,:) / dt, & ! intent(in)
+         call stat_begin_update( nz, stats_metadata%iwpthlp_bt, wpthlp(i,:) / dt, & ! intent(in)
                                  stats_zm(i) )                 ! intent(inout)
          if ( clubb_config_flags%l_predict_upwp_vpwp ) then
-            call stat_begin_update( nz, iupwp_bt, upwp(i,:) / dt, & ! intent(in)
+            call stat_begin_update( nz, stats_metadata%iupwp_bt, upwp(i,:) / dt, & ! intent(in)
                                     stats_zm(i) )             ! intent(inout)
-            call stat_begin_update( nz, ivpwp_bt, vpwp(i,:) / dt, & ! intent(in)
+            call stat_begin_update( nz, stats_metadata%ivpwp_bt, vpwp(i,:) / dt, & ! intent(in)
                                     stats_zm(i) )             ! intent(inout)
          endif ! l_predict_upwp_vpwp
-         call stat_begin_update( nz, irtp2_bt, rtp2(i,:) / dt, & ! intent(in)
+         call stat_begin_update( nz, stats_metadata%irtp2_bt, rtp2(i,:) / dt, & ! intent(in)
                                  stats_zm(i) )             ! intent(inout)
-         call stat_begin_update( nz, ithlp2_bt, thlp2(i,:) / dt, & ! intent(in)
+         call stat_begin_update( nz, stats_metadata%ithlp2_bt, thlp2(i,:) / dt, & ! intent(in)
                                  stats_zm(i) )               ! intent(inout)
-         call stat_begin_update( nz, irtpthlp_bt, rtpthlp(i,:) / dt, & ! intent(in)
+         call stat_begin_update( nz, stats_metadata%irtpthlp_bt, rtpthlp(i,:) / dt, & ! intent(in)
                                  stats_zm(i) )                   ! intent(inout)
 
-         call stat_begin_update( nz, irtm_bt, rtm(i,:) / dt, & ! intent(in)
+         call stat_begin_update( nz, stats_metadata%irtm_bt, rtm(i,:) / dt, & ! intent(in)
                                  stats_zt(i) )           ! intent(inout)
-         call stat_begin_update( nz, ithlm_bt, thlm(i,:) / dt, & ! intent(in)
+         call stat_begin_update( nz, stats_metadata%ithlm_bt, thlm(i,:) / dt, & ! intent(in)
                                  stats_zt(i) )             ! intent(inout)
-         call stat_begin_update( nz, ium_bt, um(i,:) / dt, & ! intent(in)
+         call stat_begin_update( nz, stats_metadata%ium_bt, um(i,:) / dt, & ! intent(in)
                                  stats_zt(i) )         ! intent(inout)
-         call stat_begin_update( nz, ivm_bt, vm(i,:) / dt, & ! intent(in)
+         call stat_begin_update( nz, stats_metadata%ivm_bt, vm(i,:) / dt, & ! intent(in)
                                  stats_zt(i) )         ! intent(inout)
-         call stat_begin_update( nz, iwp3_bt, wp3(i,:) / dt, & ! intent(in)
+         call stat_begin_update( nz, stats_metadata%iwp3_bt, wp3(i,:) / dt, & ! intent(in)
                                  stats_zt(i) )           ! intent(inout)
 
       end do
@@ -1136,7 +1006,7 @@ module advance_clubb_core_module
     ! We only do this for host models that do not apply the flux
     ! elsewhere in the code (e.g. WRF).  In other cases the _sfc variables will
     ! only be used to compute the variance at the surface. -dschanen 8 Sept 2009
-    if ( .not. l_host_applies_sfc_fluxes ) then
+    if ( .not. clubb_config_flags%l_host_applies_sfc_fluxes ) then
 
       !$acc parallel loop gang vector default(present)
       do i = 1, ngrdcol
@@ -1214,13 +1084,13 @@ module advance_clubb_core_module
 #ifdef CLUBBND_CAM
     !$acc parallel loop gang vector default(present)
     do i = 1, ngrdcol
-      newmu(i) = varmu(i)
+      mu(i) = varmu(i)
     end do
     !$acc end parallel loop
 #else
     !$acc parallel loop gang vector default(present)
     do i = 1, ngrdcol
-      newmu(i) = mu
+      mu(i) = clubb_params(i,imu)
     end do
     !$acc end parallel loop
 #endif
@@ -1245,8 +1115,8 @@ module advance_clubb_core_module
       !#######   AND OUTPUT PDF PARAMETERS AND INTEGRATED QUANTITITES   #######
       !########################################################################
       call pdf_closure_driver( gr, nz, ngrdcol,                             & ! Intent(in)
-                               dt, hydromet_dim, wprtp,                     & ! Intent(in)
-                               thlm, wpthlp, rtp2, rtp3,                    & ! Intent(in)
+                               dt, hydromet_dim, sclr_dim, sclr_tol,        & ! Intent(in)
+                               wprtp, thlm, wpthlp, rtp2, rtp3,             & ! Intent(in)
                                thlp2, thlp3, rtpthlp, wp2,                  & ! Intent(in)
                                wp3, wm_zm, wm_zt,                           & ! Intent(in)
                                um, up2, upwp, up3,                          & ! Intent(in)
@@ -1261,6 +1131,7 @@ module advance_clubb_core_module
                                l_samp_stats_in_pdf_call,                    & ! Intent(in)
                                clubb_params,                                & ! Intent(in)
                                clubb_config_flags%iiPDF_type,               & ! Intent(in)
+                               clubb_config_flags%saturation_formula,       & ! Intent(in)
                                clubb_config_flags%l_predict_upwp_vpwp,      & ! Intent(in)
                                clubb_config_flags%l_rtm_nudge,              & ! Intent(in)
                                clubb_config_flags%l_trapezoidal_rule_zt,    & ! Intent(in)
@@ -1268,8 +1139,10 @@ module advance_clubb_core_module
                                clubb_config_flags%l_call_pdf_closure_twice, & ! Intent(in)
                                clubb_config_flags%l_use_cloud_cover,        & ! Intent(in)
                                clubb_config_flags%l_rcm_supersat_adj,       & ! Intent(in)
-                               rtm,                                         & ! Intent(inout)
+                               l_mix_rat_hm,                                & ! Intent(in)
+                               stats_metadata,                              & ! Intent(in)
                                stats_zt, stats_zm,                          & ! Intent(inout)
+                               rtm,                                         & ! Intent(inout)
                                pdf_implicit_coefs_terms,                    & ! Intent(inout)
                                pdf_params, pdf_params_zm,                   & ! Intent(inout)
 #ifdef GFDL
@@ -1306,58 +1179,54 @@ module advance_clubb_core_module
 
     ! Interpolate wp3 to momentum levels, and wp2 to thermodynamic levels
     ! and then compute Skw for m & t grid.
-    wp2_zt(:,:) = zm2zt( nz, ngrdcol, gr, wp2(:,:) )  ! Positive definite quantity
+    wp2_zt(:,:) = zm2zt( nz, ngrdcol, gr, wp2(:,:), w_tol_sqd )  ! Positive definite quantity
     wp3_zm(:,:) = zt2zm( nz, ngrdcol, gr, wp3(:,:) )
 
-    !$acc parallel loop gang vector collapse(2) default(present)
-    do k = 1, nz
-      do i = 1, ngrdcol
-        wp2_zt(i,k) = max( wp2_zt(i,k), w_tol_sqd )
-      end do
-    end do
-    !$acc end parallel loop
-
-    beta = clubb_params(ibeta)
-    Skw_denom_coef = clubb_params(iSkw_denom_coef)
-    Skw_max_mag = clubb_params(iSkw_max_mag)
-
     call Skx_func( nz, ngrdcol, wp2_zt, wp3, &
-                   w_tol, Skw_denom_coef, Skw_max_mag, &
+                   w_tol, clubb_params, &
                    Skw_zt )
                    
     call Skx_func( nz, ngrdcol, wp2, wp3_zm, &
-                   w_tol, Skw_denom_coef, Skw_max_mag, &
+                   w_tol, clubb_params, &
                    Skw_zm )
    
-    if ( clubb_config_flags%ipdf_call_placement &
-         == ipdf_post_advance_fields ) then
-
-      gamma_coef = clubb_params(igamma_coef)
-      gamma_coefb = clubb_params(igamma_coefb)
-      gamma_coefc = clubb_params(igamma_coefc)
+    if ( clubb_config_flags%ipdf_call_placement == ipdf_post_advance_fields ) then
 
       ! Calculate sigma_sqd_w here in order to avoid having to pass it in
       ! and out of subroutine advance_clubb_core.
-      if ( l_gamma_Skw .and. &
-          abs(gamma_coef-gamma_coefb) > abs(gamma_coef+gamma_coefb)*eps/2) then
+      if ( l_gamma_Skw ) then
 
         !$acc parallel loop gang vector collapse(2) default(present)
         do k = 1, nz
           do i = 1, ngrdcol
-            gamma_Skw_fnc(i,k) = gamma_coefb + (gamma_coef-gamma_coefb) &
-                  *exp( -(1.0_core_rknd/2.0_core_rknd) * (Skw_zm(i,k)/gamma_coefc)**2 )
+
+            gamma_coef = clubb_params(i,igamma_coef)
+            gamma_coefb = clubb_params(i,igamma_coefb)
+            gamma_coefc = clubb_params(i,igamma_coefc)
+
+            if ( abs(gamma_coef-gamma_coefb) > abs(gamma_coef+gamma_coefb)*eps/2) then
+            
+              gamma_Skw_fnc(i,k) = gamma_coefb + (gamma_coef-gamma_coefb) &
+                    *exp( -(1.0_core_rknd/2.0_core_rknd) * (Skw_zm(i,k)/gamma_coefc)**2 )
+            else
+              gamma_Skw_fnc(i,k) = gamma_coef
+            end if
+
           end do
         end do
         !$acc end parallel loop
+
       else
+
         !$acc parallel loop gang vector collapse(2) default(present)
         do k = 1, nz
           do i = 1, ngrdcol
-            gamma_Skw_fnc(i,k) = gamma_coef
+            gamma_Skw_fnc(i,k) = clubb_params(i,igamma_coef)
           end do
         end do
         !$acc end parallel loop
-      endif
+
+      end if
 
       ! Compute sigma_sqd_w (dimensionless PDF width parameter)
       call compute_sigma_sqd_w( nz, ngrdcol, &
@@ -1367,15 +1236,7 @@ module advance_clubb_core_module
                                 sigma_sqd_w_tmp )
 
       ! Smooth in the vertical using interpolation
-      sigma_sqd_w(:,:) = zm2zt2zm( nz, ngrdcol, gr, sigma_sqd_w_tmp(:,:) )
-
-      !$acc parallel loop gang vector collapse(2) default(present)
-      do k = 1, nz
-        do i = 1, ngrdcol
-          sigma_sqd_w(i,k) = max( zero_threshold, sigma_sqd_w(i,k) ) ! Pos. def. quantity
-        end do
-      end do
-      !$acc end parallel loop
+      sigma_sqd_w(:,:) = zm2zt2zm( nz, ngrdcol, gr, sigma_sqd_w_tmp(:,:), zero_threshold )
 
     endif ! clubb_config_flags%ipdf_call_placement == ipdf_post_advance_fields
 
@@ -1404,7 +1265,7 @@ module advance_clubb_core_module
     !$acc parallel loop gang vector collapse(2) default(present)
     do k = 1, nz
       do i = 1, ngrdcol
-        a3_coef(i,k) = max( a3_coef(i,k), a3_coef_min )
+        a3_coef(i,k) = max( a3_coef(i,k), clubb_params(i,ia3_coef_min) )
       end do
     end do
     !$acc end parallel loop
@@ -1412,18 +1273,9 @@ module advance_clubb_core_module
     a3_coef_zt(:,:) = zm2zt( nz, ngrdcol, gr, a3_coef(:,:) )
 
     ! Interpolate thlp2, rtp2, and rtpthlp to thermodynamic levels.
-    thlp2_zt(:,:)   = zm2zt( nz, ngrdcol, gr, thlp2(:,:) )  ! Positive def. quantity
-    rtp2_zt(:,:)    = zm2zt( nz, ngrdcol, gr, rtp2(:,:) )   ! Positive def. quantity
+    thlp2_zt(:,:)   = zm2zt( nz, ngrdcol, gr, thlp2(:,:), thl_tol**2 )  ! Positive def. quantity
+    rtp2_zt(:,:)    = zm2zt( nz, ngrdcol, gr, rtp2(:,:), rt_tol**2 )   ! Positive def. quantity
     rtpthlp_zt(:,:) = zm2zt( nz, ngrdcol, gr, rtpthlp(:,:) )
-
-    !$acc parallel loop gang vector collapse(2) default(present)
-    do k = 1, nz
-      do i = 1, ngrdcol
-        thlp2_zt(i,k) = max( thlp2_zt(i,k), thl_tol**2 ) 
-        rtp2_zt(i,k)  = max( rtp2_zt(i,k), rt_tol**2 )
-      end do
-    end do
-    !$acc end parallel loop
 
     ! Compute wp3 / wp2 on zt levels.  Always use the interpolated value in the
     ! denominator since it's less likely to create spikes
@@ -1483,12 +1335,12 @@ module advance_clubb_core_module
       !$acc end parallel loop
     end if
 
-    sqrt_em_zt(:,:) = zm2zt( nz, ngrdcol, gr, em(:,:) )
+    sqrt_em_zt(:,:) = zm2zt( nz, ngrdcol, gr, em(:,:), em_min )
 
     !$acc parallel loop gang vector collapse(2) default(present)
     do k = 1, nz
       do i = 1, ngrdcol
-        sqrt_em_zt(i,k) = sqrt( max( em_min, sqrt_em_zt(i,k) ) )
+        sqrt_em_zt(i,k) = sqrt( sqrt_em_zt(i,k) )
       end do
     end do
     !$acc end parallel loop
@@ -1502,10 +1354,12 @@ module advance_clubb_core_module
       call calc_Lscale_directly ( ngrdcol, nz, gr,                             & ! intent(in)
                                   l_implemented, p_in_Pa,                      & ! intent(in)
                                   exner, rtm, thlm, thvm,                      & ! intent(in)
-                                  newmu, rtp2, thlp2, rtpthlp, pdf_params, em, & ! intent(in)
+                                  mu, rtp2_zt, thlp2_zt, rtpthlp_zt, pdf_params, em,    & ! intent(in)
                                   thv_ds_zt, Lscale_max, lmin,                 & ! intent(in)
                                   clubb_params,                                & ! intent(in)
+                                  clubb_config_flags%saturation_formula,       & ! intent(in)
                                   clubb_config_flags%l_Lscale_plume_centered,  & ! intent(in)
+                                  stats_metadata,                              & ! intent(in)
                                   stats_zt,                                    & ! intent(inout)
                                   Lscale, Lscale_up, Lscale_down )               ! intent(out)
 
@@ -1513,29 +1367,27 @@ module advance_clubb_core_module
         if ( err_code == clubb_fatal_error ) then
           err_code_out = err_code
           write(fstderr,*) "Error calling calc_Lscale_directly"
-          !return
+          return
         end if
       end if
 
       ! Calculate CLUBB's turbulent eddy-turnover time scale as
       !   CLUBB's length scale divided by a velocity scale.
-      taumax = clubb_params(itaumax)
-
       !$acc parallel loop gang vector collapse(2) default(present)
       do k = 1, nz
         do i = 1, ngrdcol
-          tau_zt(i,k) = min( Lscale(i,k) / sqrt_em_zt(i,k), taumax )
+          tau_zt(i,k) = min( Lscale(i,k) / sqrt_em_zt(i,k), clubb_params(i,itaumax) )
         end do
       end do
       !$acc end parallel loop
 
-      tau_zm(:,:) = zt2zm( nz, ngrdcol, gr, Lscale(:,:) )
+      tau_zm(:,:) = zt2zm( nz, ngrdcol, gr, Lscale(:,:), zero_threshold )
           
       !$acc parallel loop gang vector collapse(2) default(present)
       do k = 1, nz
         do i = 1, ngrdcol
-          tau_zm(i,k) = min( ( max( tau_zm(i,k), zero_threshold )  &
-                       / sqrt( max( em_min, em(i,k) ) ) ), taumax )
+          tau_zm(i,k) = min( tau_zm(i,k) / sqrt( max( em_min, em(i,k) ) ),  &
+                             clubb_params(i,itaumax) )
         end do
       end do
       !$acc end parallel loop
@@ -1549,9 +1401,13 @@ module advance_clubb_core_module
           invrs_tau_xp2_zm(i,k)  = invrs_tau_zm(i,k)
           invrs_tau_wpxp_zm(i,k) = invrs_tau_zm(i,k)
           invrs_tau_wp3_zt(i,k)  = invrs_tau_zt(i,k)
+          invrs_tau_wp3_zm(i,k)  = invrs_tau_zm(i,k)
 
-          tau_max_zm(i,k) = taumax
-          tau_max_zt(i,k) = taumax
+          tau_max_zm(i,k) = clubb_params(i,itaumax)
+          tau_max_zt(i,k) = clubb_params(i,itaumax)
+
+          Ri_zm(i,k) = zero 
+
         end do
       end do
       !$acc end parallel loop
@@ -1561,9 +1417,10 @@ module advance_clubb_core_module
       call calc_brunt_vaisala_freq_sqd( nz, ngrdcol, gr, thlm,                         & ! In
                                         exner, rtm, rcm, p_in_Pa, thvm,                & ! In
                                         ice_supersat_frac,                             & ! In
+                                        clubb_config_flags%saturation_formula,         & ! In
                                         clubb_config_flags%l_brunt_vaisala_freq_moist, & ! In
                                         clubb_config_flags%l_use_thvm_in_bv_freq,      & ! In
-                                        clubb_params(ibv_efold),                       & ! In
+                                        clubb_params(:,ibv_efold),                       & ! In
                                         brunt_vaisala_freq_sqd,                        & ! Out
                                         brunt_vaisala_freq_sqd_mixed,                  & ! Out
                                         brunt_vaisala_freq_sqd_dry,                    & ! Out
@@ -1577,17 +1434,20 @@ module advance_clubb_core_module
                         rtm, thlm, thvm,                                          & ! In
                         rcm, ice_supersat_frac,                                   & ! In
                         em, sqrt_em_zt,                                           & ! In
-                        ufmin, z_displace, tau_const,                             & ! In
+                        ufmin, tau_const,                                         & ! In
                         sfc_elevation, Lscale_max,                                & ! In
                         clubb_params,                                             & ! In
+                        stats_metadata,                                           & ! In
+                        clubb_config_flags%saturation_formula,                    & ! In
                         clubb_config_flags%l_e3sm_config,                         & ! In
                         clubb_config_flags%l_brunt_vaisala_freq_moist,            & ! In
                         clubb_config_flags%l_use_thvm_in_bv_freq,                 & ! In
                         clubb_config_flags%l_smooth_Heaviside_tau_wpxp,           & ! In
                         clubb_config_flags%l_modify_limiters_for_cnvg_test,       & ! In
+                        stats_zm,                                                 & ! Inout
                         brunt_vaisala_freq_sqd, brunt_vaisala_freq_sqd_mixed,     & ! Out
                         brunt_vaisala_freq_sqd_dry, brunt_vaisala_freq_sqd_moist, & ! Out
-                        sqrt_Ri_zm,                                               & ! Out
+                        Ri_zm,                                                    & ! Out
                         invrs_tau_zt, invrs_tau_zm,                               & ! Out
                         invrs_tau_sfc, invrs_tau_no_N2_zm, invrs_tau_bkgnd,       & ! Out
                         invrs_tau_shear, invrs_tau_N2_iso,                        & ! Out
@@ -1618,12 +1478,10 @@ module advance_clubb_core_module
 
     ! Calculate CLUBB's eddy diffusivity as
     !   CLUBB's length scale times a velocity scale.
-    c_K = clubb_params(ic_K)
-
     !$acc parallel loop gang vector collapse(2) default(present)
     do k = 1, nz
       do i = 1, ngrdcol
-        Kh_zt(i,k) = c_K * Lscale(i,k) * sqrt_em_zt(i,k)
+        Kh_zt(i,k) = clubb_params(i,ic_K) * Lscale(i,k) * sqrt_em_zt(i,k)
       end do
     end do
     !$acc end parallel loop
@@ -1633,7 +1491,7 @@ module advance_clubb_core_module
     !$acc parallel loop gang vector collapse(2) default(present)
     do k = 1, nz
       do i = 1, ngrdcol
-        Kh_zm(i,k) = c_K * max( Lscale_zm(i,k), zero_threshold )  &
+        Kh_zm(i,k) = clubb_params(i,ic_K) * max( Lscale_zm(i,k), zero_threshold )  &
                      * sqrt( max( em(i,k), em_min ) )
       end do
     end do
@@ -1642,16 +1500,16 @@ module advance_clubb_core_module
     ! calculate Brunt-Vaisala frequency used for splatting
     brunt_vaisala_freq_sqd_splat  &
                = Lscale_width_vert_avg( nz, ngrdcol, gr, smth_type, &
-                                        brunt_vaisala_freq_sqd_mixed, Lscale, rho_ds_zm, &
+                                        brunt_vaisala_freq_sqd_mixed, Lscale_zm, rho_ds_zm, &
                                         below_grnd_val )
 
     ! Vertical compression of eddies causes gustiness (increase in up2 and vp2)
-    call wp2_term_splat_lhs( nz, ngrdcol, gr, clubb_params(iC_wp2_splat),       & ! Intent(in)
+    call wp2_term_splat_lhs( nz, ngrdcol, gr, clubb_params(:,iC_wp2_splat),       & ! Intent(in)
                              brunt_vaisala_freq_sqd_splat,                      & ! Intent(in)
                              lhs_splat_wp2 )                                      ! Intent(out)
 
     ! Vertical compression of eddies also diminishes w'3
-    call wp3_term_splat_lhs( nz, ngrdcol, gr, clubb_params(iC_wp2_splat),       & ! Intent(in)
+    call wp3_term_splat_lhs( nz, ngrdcol, gr, clubb_params(:,iC_wp2_splat),       & ! Intent(in)
                              brunt_vaisala_freq_sqd_splat,                      & ! Intent(in)
                              lhs_splat_wp3 )                                      ! Intent(out)
 
@@ -1664,23 +1522,26 @@ module advance_clubb_core_module
     ! level is not the ground level.  Brian Griffin.  December 22, 2005.
 
     ! Diagnose surface variances based on surface fluxes.
-    call calc_sfc_varnce( nz, ngrdcol, gr, dt, sfc_elevation,       & ! Intent(in)
-                          upwp_sfc, vpwp_sfc, wpthlp, wprtp_sfc,    & ! Intent(in)
-                          um, vm, Lscale_up, wpsclrp_sfc,           & ! Intent(in)
-                          lhs_splat_wp2, tau_zm,                    & ! Intent(in)
-                          !wp2_splat, tau_zm,                       & ! Intent(in)
-                          clubb_config_flags%l_vary_convect_depth,  & ! Intent(in)
-                          clubb_params,                             & ! Intent(in)
-                          stats_zm,                                 & ! Intent(inout)
-                          wp2, up2, vp2,                            & ! Intent(inout)
-                          thlp2, rtp2, rtpthlp,                     & ! Intent(inout)
-                          sclrp2, sclrprtp, sclrpthlp )               ! Intent(inout)
+    call calc_sfc_varnce( nz, ngrdcol, sclr_dim, sclr_idx,            & ! Intent(in)
+                          gr, dt, sfc_elevation,                          & ! Intent(in)
+                          upwp_sfc, vpwp_sfc, wpthlp, wprtp_sfc,          & ! Intent(in)
+                          um, vm, Lscale_up, wpsclrp_sfc,                 & ! Intent(in)
+                          lhs_splat_wp2, tau_zm,                          & ! Intent(in)
+                          !wp2_splat, tau_zm,                             & ! Intent(in)
+                          clubb_config_flags%l_vary_convect_depth,        & ! Intent(in)
+                          clubb_params(:,iup2_sfc_coef),                  & ! Intent(in)
+                          clubb_params(:,ia_const),                        & ! Intent(in)
+                          stats_metadata,                                 & ! Intent(in)
+                          stats_zm,                                       & ! Intent(inout)
+                          wp2, up2, vp2,                                  & ! Intent(inout)
+                          thlp2, rtp2, rtpthlp,                           & ! Intent(inout)
+                          sclrp2, sclrprtp, sclrpthlp )                     ! Intent(inout)
 
     if ( clubb_at_least_debug_level( 0 ) ) then
       if ( err_code == clubb_fatal_error ) then
         err_code_out = err_code
         write(fstderr, *) "Error calling calc_sfc_varnce"
-        !return
+        return
       end if
     end if
 
@@ -1688,33 +1549,34 @@ module advance_clubb_core_module
     !############## ADVANCE PROGNOSTIC VARIABLES ONE TIMESTEP ##############
     !#######################################################################
 
-    if ( l_stats_samp ) then
+    if ( stats_metadata%l_stats_samp ) then
 
       !$acc update host( rtm, rcm, thlm, exner, p_in_Pa )
 
       do i = 1, ngrdcol
-        call stat_update_var( irvm, rtm(i,:) - rcm(i,:), & !intent(in)
+        call stat_update_var( stats_metadata%irvm, rtm(i,:) - rcm(i,:), & !intent(in)
                               stats_zt(i) )               !intent(inout)
       end do
 
       ! Output relative humidity (q/q∗ where q∗ is the saturation mixing ratio over liquid)
-      ! Added an extra check for irel_humidity > 0; otherwise, if both irsat = 0 and
-      ! irel_humidity = 0, rsat is not computed, leading to a floating-point exception
+      ! Added an extra check for stats_metadata%irel_humidity > 0; otherwise, if both stats_metadata%irsat = 0 and
+      ! stats_metadata%irel_humidity = 0, rsat is not computed, leading to a floating-point exception
       ! when stat_update_var is called for rel_humidity.  ldgrant
-      if ( irel_humidity > 0 ) then
+      if ( stats_metadata%irel_humidity > 0 ) then
         
         rsat = sat_mixrat_liq( nz, ngrdcol, p_in_Pa, &
-                               thlm2T_in_K( nz, ngrdcol, thlm, exner, rcm ) )
+                               thlm2T_in_K( nz, ngrdcol, thlm, exner, rcm ), &
+                               clubb_config_flags%saturation_formula )
 
         ! Recompute rsat and rel_humidity. They might have changed.
         do i = 1, ngrdcol
           rel_humidity(i,:) = (rtm(i,:) - rcm(i,:)) / rsat(i,:)
 
-          call stat_update_var( irel_humidity, rel_humidity(i,:), &             ! intent(in)
+          call stat_update_var( stats_metadata%irel_humidity, rel_humidity(i,:), &             ! intent(in)
                                 stats_zt(i))                                  ! intent(inout)
         end do
-      end if ! irel_humidity > 0
-    end if ! l_stats_samp
+      end if ! stats_metadata%irel_humidity > 0
+    end if ! stats_metadata%l_stats_samp
 
     !----------------------------------------------------------------
     ! Advance rtm/wprtp and thlm/wpthlp one time step
@@ -1746,19 +1608,20 @@ module advance_clubb_core_module
 
       ! Determine stability correction factor
       call calc_stability_correction( nz, ngrdcol, gr,                               & ! In
-                                      thlm, Lscale, em,                              & ! In
+                                      thlm, Lscale_zm, em,                           & ! In
                                       exner, rtm, rcm,                               & ! In
                                       p_in_Pa, thvm, ice_supersat_frac,              & ! In
-                                      clubb_params(ilambda0_stability_coef),         & ! In
-                                      clubb_params(ibv_efold),                       & ! In
+                                      clubb_params(:,ilambda0_stability_coef),       & ! In
+                                      clubb_params(:,ibv_efold),                     & ! In
+                                      clubb_config_flags%saturation_formula,         & ! In
                                       clubb_config_flags%l_brunt_vaisala_freq_moist, & ! In
                                       clubb_config_flags%l_use_thvm_in_bv_freq,      & ! In
                                       stability_correction )                           ! Out
 
-      if ( l_stats_samp ) then
+      if ( stats_metadata%l_stats_samp ) then
         !$acc update host( stability_correction )
         do i = 1, ngrdcol
-          call stat_update_var( istability_correction, stability_correction(i,:), & ! In
+          call stat_update_var( stats_metadata%istability_correction, stability_correction(i,:), & ! In
                                 stats_zm(i) ) ! In/Out
         end do
       end if
@@ -1823,42 +1686,49 @@ module advance_clubb_core_module
       !$acc end parallel loop
     end if
 
-    if ( l_stats_samp ) then
+    if ( stats_metadata%l_stats_samp ) then
 
       !$acc update host( invrs_tau_zm, invrs_tau_xp2_zm, invrs_tau_wp2_zm, invrs_tau_wpxp_zm, &
-      !$acc              sqrt_Ri_zm, invrs_tau_wp3_zm, invrs_tau_no_N2_zm, invrs_tau_bkgnd, &
+      !$acc              Ri_zm, invrs_tau_wp3_zm, invrs_tau_no_N2_zm, invrs_tau_bkgnd, &
       !$acc              invrs_tau_sfc, invrs_tau_shear, brunt_vaisala_freq_sqd, &
-      !$acc              brunt_vaisala_freq_sqd_splat )
+      !$acc              brunt_vaisala_freq_sqd_splat, brunt_vaisala_freq_sqd_mixed, &
+      !$acc              brunt_vaisala_freq_sqd_moist, brunt_vaisala_freq_sqd_dry )
 
       do i = 1, ngrdcol
     
-        call stat_update_var(iinvrs_tau_zm, invrs_tau_zm(i,:), & ! intent(in)
+        call stat_update_var(stats_metadata%iinvrs_tau_zm, invrs_tau_zm(i,:), & ! intent(in)
                              stats_zm(i))                      ! intent(inout)
-        call stat_update_var(iinvrs_tau_xp2_zm, invrs_tau_xp2_zm(i,:), & ! intent(in)
+        call stat_update_var(stats_metadata%iinvrs_tau_xp2_zm, invrs_tau_xp2_zm(i,:), & ! intent(in)
                              stats_zm(i))                              ! intent(inout)
-        call stat_update_var(iinvrs_tau_wp2_zm, invrs_tau_wp2_zm(i,:), & ! intent(in)
+        call stat_update_var(stats_metadata%iinvrs_tau_wp2_zm, invrs_tau_wp2_zm(i,:), & ! intent(in)
                              stats_zm(i))                              ! intent(inout)
-        call stat_update_var(iinvrs_tau_wpxp_zm, invrs_tau_wpxp_zm(i,:), & ! intent(in)
+        call stat_update_var(stats_metadata%iinvrs_tau_wpxp_zm, invrs_tau_wpxp_zm(i,:), & ! intent(in)
                              stats_zm(i))                                ! intent(inout)
-        call stat_update_var(isqrt_Ri_zm, sqrt_Ri_zm(i,:), & ! intent(in)
+        call stat_update_var(stats_metadata%iRi_zm, Ri_zm(i,:), & ! intent(in)
                              stats_zm(i))                  ! intent(inout)
-        call stat_update_var(iinvrs_tau_wp3_zm, invrs_tau_wp3_zm(i,:), &   ! intent(in)
+        call stat_update_var(stats_metadata%iinvrs_tau_wp3_zm, invrs_tau_wp3_zm(i,:), &   ! intent(in)
                              stats_zm(i))                                ! intent(inout)
 
         if ( clubb_config_flags%l_diag_Lscale_from_tau ) then
-          call stat_update_var(iinvrs_tau_no_N2_zm, invrs_tau_no_N2_zm(i,:), & ! intent(in)
+          call stat_update_var(stats_metadata%iinvrs_tau_no_N2_zm, invrs_tau_no_N2_zm(i,:), & ! intent(in)
                                stats_zm(i))                                  ! intent(inout)
-          call stat_update_var(iinvrs_tau_bkgnd, invrs_tau_bkgnd(i,:), & ! intent(in)
+          call stat_update_var(stats_metadata%iinvrs_tau_bkgnd, invrs_tau_bkgnd(i,:), & ! intent(in)
                                stats_zm(i))                            ! intent(inout)
-          call stat_update_var(iinvrs_tau_sfc, invrs_tau_sfc(i,:), & ! intent(in)
+          call stat_update_var(stats_metadata%iinvrs_tau_sfc, invrs_tau_sfc(i,:), & ! intent(in)
                                stats_zm(i))                        ! intent(inout)
-          call stat_update_var(iinvrs_tau_shear, invrs_tau_shear(i,:), & ! intent(in)
+          call stat_update_var(stats_metadata%iinvrs_tau_shear, invrs_tau_shear(i,:), & ! intent(in)
                                stats_zm(i))                            ! intent(inout)
-          call stat_update_var(ibrunt_vaisala_freq_sqd, brunt_vaisala_freq_sqd(i,:), & ! intent(in)
-                               stats_zm(i))                                          ! intent(inout)
         end if
-        call stat_update_var(ibrunt_vaisala_freq_sqd_splat, brunt_vaisala_freq_sqd_splat(i,:), & ! intent(in)
-                               stats_zm(i))
+        call stat_update_var(stats_metadata%ibrunt_vaisala_freq_sqd, brunt_vaisala_freq_sqd(i,:), & ! intent(in)
+                             stats_zm(i))
+        call stat_update_var(stats_metadata%ibrunt_vaisala_freq_sqd_splat, brunt_vaisala_freq_sqd_splat(i,:), & ! intent(in)
+                             stats_zm(i))                                       ! intent(inout)
+        call stat_update_var(stats_metadata%ibrunt_vaisala_freq_sqd_mixed, brunt_vaisala_freq_sqd_mixed(i,:), & ! intent(in)
+                             stats_zm(i))                                          ! intent(inout)
+        call stat_update_var(stats_metadata%ibrunt_vaisala_freq_sqd_moist, brunt_vaisala_freq_sqd_moist(i,:), & ! intent(in)
+                             stats_zm(i))                                          ! intent(inout)
+        call stat_update_var(stats_metadata%ibrunt_vaisala_freq_sqd_dry, brunt_vaisala_freq_sqd_dry(i,:), & ! intent(in)
+                             stats_zm(i))                                          ! intent(inout)
       end do
     end if
 
@@ -1872,10 +1742,12 @@ module advance_clubb_core_module
                                       rcm, p_in_Pa, thvm, rho_ds_zm,                 & ! intent(in)
                                       ice_supersat_frac,                             & ! intent(in)
                                       clubb_params,                                  & ! intent(in)
+                                      clubb_config_flags%saturation_formula,         & ! intent(in)
                                       clubb_config_flags%l_brunt_vaisala_freq_moist, & ! intent(in)
                                       clubb_config_flags%l_use_thvm_in_bv_freq,      & ! intent(in
                                       clubb_config_flags%l_use_shear_Richardson,     & ! intent(in)
                                       clubb_config_flags%l_modify_limiters_for_cnvg_test, & ! intent(in)
+                                      stats_metadata,                                & ! intent(in)
                                       stats_zm,                                      & ! intent(inout)
                                       Cx_fnc_Richardson )                              ! intent(out)
     else
@@ -1901,8 +1773,9 @@ module advance_clubb_core_module
       !   scalar turbulent fluxes (wprtp, wpthlp, and wpsclrp)
       !   by one time step.
       ! advance_xm_wpxp_bad_wp2 ! Test error comment, DO NOT modify or move
-      call advance_xm_wpxp( nz, ngrdcol, gr, dt_advance, sigma_sqd_w, wm_zm, wm_zt, wp2, & ! intent(in)
-                            Lscale, wp3_on_wp2, wp3_on_wp2_zt, Kh_zt, Kh_zm,      & ! intent(in)
+      call advance_xm_wpxp( nz, ngrdcol, sclr_dim, sclr_tol, gr, dt_advance,      & ! intent(in)  
+                            sigma_sqd_w, wm_zm, wm_zt, wp2,                       & ! intent(in)
+                            Lscale_zm, wp3_on_wp2, wp3_on_wp2_zt, Kh_zt, Kh_zm,   & ! intent(in)
                             invrs_tau_C6_zm, tau_max_zm, Skw_zm, wp2rtp, rtpthvp, & ! intent(in)
                             rtm_forcing, wprtp_forcing, rtm_ref, wp2thlp,         & ! intent(in)
                             thlpthvp, thlm_forcing, wpthlp_forcing, thlm_ref,     & ! intent(in)
@@ -1916,11 +1789,12 @@ module advance_clubb_core_module
                             pdf_implicit_coefs_terms,                             & ! intent(in)
                             um_forcing, vm_forcing, ug, vg, wpthvp,               & ! intent(in)
                             fcor, um_ref, vm_ref, up2, vp2,                       & ! intent(in)
-                            uprcp, vprcp, rc_coef,                                & ! intent(in)
+                            uprcp, vprcp, rc_coef_zm,                             & ! intent(in)
                             clubb_params, nu_vert_res_dep,                        & ! intent(in)
                             clubb_config_flags%iiPDF_type,                        & ! intent(in)
                             clubb_config_flags%penta_solve_method,                & ! intent(in)
                             clubb_config_flags%tridiag_solve_method,              & ! intent(in)
+                            clubb_config_flags%saturation_formula,                & ! intent(in)
                             clubb_config_flags%l_predict_upwp_vpwp,               & ! intent(in)
                             clubb_config_flags%l_diffuse_rtm_and_thlm,            & ! intent(in)
                             clubb_config_flags%l_stability_correct_Kh_N2_zm,      & ! intent(in)
@@ -1941,6 +1815,7 @@ module advance_clubb_core_module
                             clubb_config_flags%l_mono_flux_lim_vm,                & ! intent(in)
                             clubb_config_flags%l_mono_flux_lim_spikefix,          & ! intent(in)
                             order_xm_wpxp, order_xp2_xpyp, order_wp2_wp3,         & ! intent(in)
+                            stats_metadata,                                       & ! intent(in)
                             stats_zt, stats_zm, stats_sfc,                        & ! intent(i/o)
                             rtm, wprtp, thlm, wpthlp,                             & ! intent(i/o)
                             sclrm, wpsclrp, um, upwp, vm, vpwp,                   & ! intent(i/o)
@@ -1950,7 +1825,7 @@ module advance_clubb_core_module
          if ( err_code == clubb_fatal_error ) then
             err_code_out = err_code
             write(fstderr,*) "Error calling advance_xm_wpxp"
-            !return
+            return
          end if
       end if
 
@@ -1989,7 +1864,7 @@ module advance_clubb_core_module
       ! Advance the prognostic equations
       !   for scalar variances and covariances,
       !   plus the horizontal wind variances by one time step, by one time step.
-      call advance_xp2_xpyp( nz, ngrdcol, gr,                             & ! intent(in)
+      call advance_xp2_xpyp( nz, ngrdcol, sclr_dim, sclr_tol, gr, sclr_idx,  & ! intent(in)
                              invrs_tau_xp2_zm, invrs_tau_C4_zm,           & ! intent(in)
                              invrs_tau_C14_zm, wm_zm,                     & ! intent(in)
                              rtm, wprtp, thlm, wpthlp, wpthvp, um, vm,    & ! intent(in)
@@ -2014,6 +1889,7 @@ module advance_clubb_core_module
                              clubb_config_flags%l_upwind_xpyp_ta,         & ! intent(in)
                              clubb_config_flags%l_godunov_upwind_xpyp_ta, & ! intent(in)
                              clubb_config_flags%l_lmm_stepping,           & ! intent(in)
+                             stats_metadata,                              & ! In
                              stats_zt, stats_zm, stats_sfc,               & ! intent(inout)
                              rtp2, thlp2, rtpthlp, up2, vp2,              & ! intent(inout)
                              sclrp2, sclrprtp, sclrpthlp)                   ! intent(inout)
@@ -2022,7 +1898,7 @@ module advance_clubb_core_module
          if ( err_code == clubb_fatal_error ) then
             err_code_out = err_code
             write(fstderr,*) "Error calling advance_xp2_xpyp"
-            !return
+            return
          end if
       end if
 
@@ -2073,12 +1949,14 @@ module advance_clubb_core_module
          endif ! l_predict_upwp_vpwp
       endif
 
-      call clip_covars_denom( nz, ngrdcol, gr, dt, rtp2, thlp2, up2, vp2, wp2,  & ! intent(in)
+      call clip_covars_denom( nz, ngrdcol, sclr_dim, gr, dt,                    & ! intent(in)
+                              rtp2, thlp2, up2, vp2, wp2,                       & ! intent(in)
                               sclrp2, wprtp_cl_num, wpthlp_cl_num,              & ! intent(in)
                               wpsclrp_cl_num, upwp_cl_num, vpwp_cl_num,         & ! intent(in)
                               clubb_config_flags%l_predict_upwp_vpwp,           & ! intent(in)
                               clubb_config_flags%l_tke_aniso,                   & ! intent(in)
                               clubb_config_flags%l_linearize_pbl_winds,         & ! intent(in)
+                              stats_metadata,                                   & ! intent(in)
                               stats_zm,                                         & ! intent(inout)
                               wprtp, wpthlp, upwp, vpwp, wpsclrp,               & ! intent(inout)
                               upwp_pert, vpwp_pert )                              ! intent(inout)
@@ -2119,6 +1997,7 @@ module advance_clubb_core_module
                             clubb_config_flags%l_use_tke_in_wp3_pr_turb_term,     & ! intent(in)
                             clubb_config_flags%l_use_tke_in_wp2_wp3_K_dfsn,       & ! intent(in)
                             clubb_config_flags%l_use_wp3_lim_with_smth_Heaviside, & ! intent(in)
+                            stats_metadata,                                       & ! intent(in)
                             stats_zt, stats_zm, stats_sfc,                        & ! intent(inout)
                             wp2, wp3, wp3_zm, wp2_zt )                              ! intent(inout)
 
@@ -2126,7 +2005,7 @@ module advance_clubb_core_module
          if ( err_code == clubb_fatal_error ) then
             err_code_out = err_code
             write(fstderr,*) "Error calling advance_wp2_wp3"
-            !return
+            return
          end if
       end if
 
@@ -2178,12 +2057,14 @@ module advance_clubb_core_module
          endif ! l_predict_upwp_vpwp
       endif
 
-      call clip_covars_denom( nz, ngrdcol, gr, dt, rtp2, thlp2, up2, vp2, wp2,  & ! intent(in)
+      call clip_covars_denom( nz, ngrdcol, sclr_dim, gr, dt,                    & ! intent(in)
+                              rtp2, thlp2, up2, vp2, wp2,                       & ! intent(in)
                               sclrp2, wprtp_cl_num, wpthlp_cl_num,              & ! intent(in)
                               wpsclrp_cl_num, upwp_cl_num, vpwp_cl_num,         & ! intent(in)
                               clubb_config_flags%l_predict_upwp_vpwp,           & ! intent(in)
                               clubb_config_flags%l_tke_aniso,                   & ! intent(in)
                               clubb_config_flags%l_linearize_pbl_winds,         & ! intent(in)
+                              stats_metadata,                                   & ! intent(in)
                               stats_zm,                                         & ! intent(inout)
                               wprtp, wpthlp, upwp, vpwp, wpsclrp,               & ! intent(inout)
                               upwp_pert, vpwp_pert )                              ! intent(inout)
@@ -2198,9 +2079,9 @@ module advance_clubb_core_module
       !$acc parallel loop gang vector collapse(2) default(present)
       do k = 1, nz
         do i = 1, ngrdcol
-          Km_zm(i,k) = Kh_zm(i,k) * C_K10   ! Coefficient for momentum
+          Km_zm(i,k) = Kh_zm(i,k) * clubb_params(i,ic_K10)   ! Coefficient for momentum
 
-          Kmh_zm(i,k) = Kh_zm(i,k) * C_K10h ! Coefficient for thermo
+          Kmh_zm(i,k) = Kh_zm(i,k) * clubb_params(i,ic_K10h) ! Coefficient for thermo
         end do
       end do
       !$acc end parallel loop
@@ -2216,7 +2097,7 @@ module advance_clubb_core_module
         !$acc end parallel loop
       end if
 
-      call advance_windm_edsclrm( nz, ngrdcol, gr, dt,                        & ! intent(in)
+      call advance_windm_edsclrm( nz, ngrdcol, edsclr_dim, gr, dt,            & ! intent(in)
                                   wm_zt, Km_zm, Kmh_zm,                       & ! intent(in)
                                   ug, vg, um_ref, vm_ref,                     & ! intent(in)
                                   wp2, up2, vp2, um_forcing, vm_forcing,      & ! intent(in)
@@ -2232,6 +2113,7 @@ module advance_clubb_core_module
                                   clubb_config_flags%l_lmm_stepping,          & ! intent(in)
                                   clubb_config_flags%l_linearize_pbl_winds,   & ! intent(in)
                                   order_xp2_xpyp, order_wp2_wp3, order_windm, & ! intent(in)
+                                  stats_metadata,                             & ! intent(in)
                                   stats_zt, stats_zm, stats_sfc,              & ! intent(inout)
                                   um, vm, edsclrm,                            & ! intent(inout)
                                   upwp, vpwp, wpedsclrp,                      & ! intent(inout)
@@ -2265,9 +2147,9 @@ module advance_clubb_core_module
 #ifdef CLUBB_CAM
       do ixind=1,edsclr_dim
         ! upper_hf_level = nz since we are filling the zt levels
-        call fill_holes_vertical( nz, ngrdcol, num_hf_draw_points, zero_threshold, nz,  & ! In
-                                  gr%dzt, rho_ds_zt,                                    & ! In
-                                  edsclrm(:,:,ixind) )                                    ! InOut
+        call fill_holes_vertical( nz, ngrdcol, zero_threshold, nz,  & ! In
+                                  gr%dzt, rho_ds_zt,                & ! In
+                                  edsclrm(:,:,ixind) )                ! InOut
       enddo
 #endif
 
@@ -2286,28 +2168,29 @@ module advance_clubb_core_module
       ! simplified form of the <x'^3> predictive equation.  The simplified
       ! <x'^3> equation can either be advanced from its previous value or
       ! calculated using a steady-state approximation.
-      call advance_xp3( nz, ngrdcol, gr, dt,                        & ! Intent(in)
+      call advance_xp3( nz, ngrdcol, sclr_dim, sclr_tol, gr, dt,    & ! Intent(in)
                         rtm, thlm, rtp2, thlp2, wprtp,              & ! Intent(in)
                         wpthlp, wprtp2, wpthlp2, rho_ds_zm,         & ! Intent(in)
                         invrs_rho_ds_zt, invrs_tau_zt, tau_max_zt,  & ! Intent(in)
                         sclrm, sclrp2, wpsclrp, wpsclrp2,           & ! Intent(in)
                         clubb_config_flags%l_lmm_stepping,          & ! intent(in)
+                        stats_metadata,                             & ! intent(in)
                         stats_zt,                                   & ! intent(inout)
                         rtp3, thlp3, sclrp3 )                         ! Intent(inout)
 
       ! Use a modified form of the Larson and Golaz (2005) ansatz for the
       ! ADG1 PDF to calculate <u'^3> and <v'^3> for another type of PDF.
       call Skx_func( nz, ngrdcol, wp2_zt, wp3, &
-                     w_tol, Skw_denom_coef, Skw_max_mag, &
+                     w_tol, clubb_params, &
                      Skw_zt )
 
       upwp_zt(:,:) = zm2zt( nz, ngrdcol, gr, upwp(:,:) )
       vpwp_zt(:,:) = zm2zt( nz, ngrdcol, gr, vpwp(:,:) )
-      up2_zt(:,:)  = max( zm2zt( nz, ngrdcol, gr, up2(:,:) ), w_tol_sqd ) ! Positive def. quantity
-      vp2_zt(:,:)  = max( zm2zt( nz, ngrdcol, gr, vp2(:,:) ), w_tol_sqd ) ! Positive def. quantity
+      up2_zt(:,:)  = zm2zt( nz, ngrdcol, gr, up2(:,:), w_tol_sqd ) ! Positive def. quantity
+      vp2_zt(:,:)  = zm2zt( nz, ngrdcol, gr, vp2(:,:), w_tol_sqd ) ! Positive def. quantity
 
-      thvm_zm(:,:) = zt2zm( nz, ngrdcol, gr, thvm(:,:) )
-      ddzm_thvm_zm(:,:) = ddzm( nz, ngrdcol, gr, thvm_zm(:,:) )
+      thvm_zm(:,:)                   = zt2zm( nz, ngrdcol, gr, thvm(:,:), zero_threshold )
+      ddzm_thvm_zm(:,:)              = ddzm( nz, ngrdcol, gr, thvm_zm(:,:) )
       brunt_vaisala_freq_sqd_zt(:,:) = max( ( grav / thvm(:,:) ) * ddzm_thvm_zm(:,:), zero )
 
       ! The xp3_coef_fnc is used in place of sigma_sqd_w_zt when the ADG1 PDF
@@ -2316,105 +2199,75 @@ module advance_clubb_core_module
       ! When xp3_coef_fnc goes to 0, the value of Skx goes to the smallest
       ! magnitude permitted by the function.  When xp3_coef_fnc goes to 1, the
       ! magnitude of Skx becomes huge.
-      xp3_coef_base = clubb_params(ixp3_coef_base)
-      xp3_coef_slope = clubb_params(ixp3_coef_slope)
-
       do k = 1, nz
         do i = 1, ngrdcol
-          xp3_coef_fnc(i,k) = xp3_coef_base &
-                              + ( one - xp3_coef_base ) &
-                                * ( one - exp( brunt_vaisala_freq_sqd_zt(i,k) / xp3_coef_slope ) )
+          xp3_coef_fnc(i,k) = clubb_params(i,ixp3_coef_base) &
+                              + ( one - clubb_params(i,ixp3_coef_slope) ) &
+                                * ( one - exp( brunt_vaisala_freq_sqd_zt(i,k) / clubb_params(i,ixp3_coef_slope) ) )
         end do
       end do
 
       call xp3_LG_2005_ansatz( nz, ngrdcol, Skw_zt, upwp_zt, wp2_zt, &
                                up2_zt, xp3_coef_fnc, &
-                               beta, Skw_denom_coef, w_tol, &
+                               clubb_params, w_tol, &
                                up3 )
 
       call xp3_LG_2005_ansatz( nz, ngrdcol, Skw_zt, vpwp_zt, wp2_zt, &
                                vp2_zt, xp3_coef_fnc, &
-                               beta, Skw_denom_coef, w_tol, &
+                               clubb_params, w_tol, &
                                vp3 )
 
     else ! .not. l_advance_xp3 .or. clubb_config_flags%iiPDF_type = iiPDF_ADG1
 
       ! The ADG1 PDF must use this option.
       call Skx_func( nz, ngrdcol, wp2_zt, wp3, &
-                     w_tol, Skw_denom_coef, Skw_max_mag, &
+                     w_tol, clubb_params, &
                      Skw_zt )
 
       wpthlp_zt(:,:) = zm2zt( nz, ngrdcol, gr, wpthlp(:,:) )
       wprtp_zt(:,:)  = zm2zt( nz, ngrdcol, gr, wprtp(:,:) )
-      thlp2_zt(:,:)  = zm2zt( nz, ngrdcol, gr, thlp2(:,:) ) ! Positive def. quantity
-      rtp2_zt(:,:)   = zm2zt( nz, ngrdcol, gr, rtp2(:,:) )   ! Positive def. quantity
+      thlp2_zt(:,:)  = zm2zt( nz, ngrdcol, gr, thlp2(:,:), thl_tol**2 ) ! Positive def. quantity
+      rtp2_zt(:,:)   = zm2zt( nz, ngrdcol, gr, rtp2(:,:), rt_tol**2 )   ! Positive def. quantity
 
       upwp_zt(:,:) = zm2zt( nz, ngrdcol, gr, upwp(:,:) )
       vpwp_zt(:,:) = zm2zt( nz, ngrdcol, gr, vpwp(:,:) )
-      up2_zt(:,:)  = zm2zt( nz, ngrdcol, gr, up2(:,:) ) ! Positive def. quantity
-      vp2_zt(:,:)  = zm2zt( nz, ngrdcol, gr, vp2(:,:) ) ! Positive def. quantity
-
-      !$acc parallel loop gang vector collapse(2) default(present)
-      do k = 1, nz
-        do i = 1, ngrdcol
-          thlp2_zt(i,k) = max( thlp2_zt(i,k), thl_tol**2 )
-          rtp2_zt(i,k)  = max( rtp2_zt(i,k), rt_tol**2 ) 
-          up2_zt(i,k)   = max( up2_zt(i,k), w_tol_sqd )
-          vp2_zt(i,k)   = max( vp2_zt(i,k), w_tol_sqd )
-        end do
-      end do
-      !$acc end parallel loop
+      up2_zt(:,:)  = zm2zt( nz, ngrdcol, gr, up2(:,:), w_tol_sqd ) ! Positive def. quantity
+      vp2_zt(:,:)  = zm2zt( nz, ngrdcol, gr, vp2(:,:), w_tol_sqd ) ! Positive def. quantity
 
       if ( clubb_config_flags%iiPDF_type == iiPDF_ADG1 ) then
 
         ! Use the Larson and Golaz (2005) ansatz for the ADG1 PDF to
         ! calculate <rt'^3>, <thl'^3>, <u'^3>, <v'^3>, and <sclr'^3>.
-        sigma_sqd_w_zt(:,:) = zm2zt( nz, ngrdcol, gr, sigma_sqd_w(:,:) )
-
-        !$acc parallel loop gang vector collapse(2) default(present)
-        do k = 1, nz
-          do i = 1, ngrdcol
-            sigma_sqd_w_zt(i,k) = max( sigma_sqd_w_zt(i,k), zero_threshold )
-          end do
-        end do
-        !$acc end parallel loop
+        sigma_sqd_w_zt(:,:) = zm2zt( nz, ngrdcol, gr, sigma_sqd_w(:,:), zero_threshold )
 
         call xp3_LG_2005_ansatz( nz, ngrdcol, Skw_zt, wpthlp_zt, wp2_zt, &
                                  thlp2_zt, sigma_sqd_w_zt, &
-                                 beta, Skw_denom_coef, thl_tol, &
+                                 clubb_params, thl_tol, &
                                  thlp3 )
 
         call xp3_LG_2005_ansatz( nz, ngrdcol, Skw_zt, wprtp_zt, wp2_zt, &
                                  rtp2_zt, sigma_sqd_w_zt, &
-                                 beta, Skw_denom_coef, rt_tol, &
+                                 clubb_params, rt_tol, &
                                  rtp3 )
 
         call xp3_LG_2005_ansatz( nz, ngrdcol, Skw_zt, upwp_zt, wp2_zt, &
                                  up2_zt, sigma_sqd_w_zt, &
-                                 beta, Skw_denom_coef, w_tol, &
+                                 clubb_params, w_tol, &
                                  up3 )
 
         call xp3_LG_2005_ansatz( nz, ngrdcol, Skw_zt, vpwp_zt, wp2_zt, &
                                  vp2_zt, sigma_sqd_w_zt, &
-                                 beta, Skw_denom_coef, w_tol, &
+                                 clubb_params, w_tol, &
                                  vp3 )
 
         do j = 1, sclr_dim, 1
           
-          wpsclrp_zt(:,:) = zm2zt( nz, ngrdcol, gr, wpsclrp(:,:,j) )
-          sclrp2_zt(:,:)  = zm2zt( nz, ngrdcol, gr, sclrp2(:,:,j) )
-
-          !$acc parallel loop gang vector collapse(2) default(present)
-          do k = 1, nz
-            do i = 1, ngrdcol
-              sclrp2_zt(i,k)  = max( sclrp2_zt(i,k), sclr_tol(j)**2 )
-            end do
-          end do
-          !$acc end parallel loop
+          wpsclrp_zt(:,:) = zm2zt( nz, ngrdcol, gr, wpsclrp(:,:,j), sclr_tol(j)**2 )
+          sclrp2_zt(:,:)  = zm2zt( nz, ngrdcol, gr, sclrp2(:,:,j), sclr_tol(j)**2 )
 
           call xp3_LG_2005_ansatz( nz, ngrdcol, Skw_zt, wpsclrp_zt, wp2_zt, &
                                    sclrp2_zt, sigma_sqd_w_zt, &
-                                   beta, Skw_denom_coef, sclr_tol(j), &
+                                   clubb_params, sclr_tol(j), &
                                    sclrp3 )
 
         enddo ! i = 1, sclr_dim
@@ -2423,8 +2276,8 @@ module advance_clubb_core_module
 
         ! Use a modified form of the Larson and Golaz (2005) ansatz for the
         ! ADG1 PDF to calculate <u'^3> and <v'^3> for another type of PDF.
-        thvm_zm(:,:) = zt2zm( nz, ngrdcol, gr, thvm(:,:) )
-        ddzm_thvm_zm(:,:) = ddzm( nz, ngrdcol, gr, thvm_zm(:,:) )
+        thvm_zm(:,:)                   = zt2zm( nz, ngrdcol, gr, thvm(:,:), zero_threshold )
+        ddzm_thvm_zm(:,:)              = ddzm( nz, ngrdcol, gr, thvm_zm(:,:) )
         brunt_vaisala_freq_sqd_zt(:,:) = max( ( grav / thvm(:,:) ) * ddzm_thvm_zm(:,:), zero )
         
         
@@ -2445,45 +2298,42 @@ module advance_clubb_core_module
         ! higher degree of static stability.  The exp{ } portion of the
         ! xp3_coef_fnc allows the xp3_coef_fnc to become larger in regions
         ! of high static stability, producing larger magnitude values of Skx.
-        xp3_coef_base = clubb_params(ixp3_coef_base)
-        xp3_coef_slope = clubb_params(ixp3_coef_slope)
-
         do k = 1, nz
           do i = 1, ngrdcol
-            xp3_coef_fnc(i,k) = xp3_coef_base &
-              + ( one - xp3_coef_base ) &
-                * ( one - exp( brunt_vaisala_freq_sqd_zt(i,k) / xp3_coef_slope ) )
+            xp3_coef_fnc(i,k) = clubb_params(i,ixp3_coef_base) &
+              + ( one - clubb_params(i,ixp3_coef_slope) ) &
+                * ( one - exp( brunt_vaisala_freq_sqd_zt(i,k) / clubb_params(i,ixp3_coef_slope) ) )
           end do
         end do
         
         call xp3_LG_2005_ansatz( nz, ngrdcol, Skw_zt, wpthlp_zt, wp2_zt, &
                                  thlp2_zt, xp3_coef_fnc, &
-                                 beta, Skw_denom_coef, thl_tol, &
+                                 clubb_params, thl_tol, &
                                  thlp3 )
 
         call xp3_LG_2005_ansatz( nz, ngrdcol, Skw_zt, wprtp_zt, wp2_zt, &
                                  rtp2_zt, xp3_coef_fnc, &
-                                 beta, Skw_denom_coef, rt_tol, &
+                                 clubb_params, rt_tol, &
                                  rtp3 )
 
         call xp3_LG_2005_ansatz( nz, ngrdcol, Skw_zt, upwp_zt, wp2_zt, &
                                  up2_zt, xp3_coef_fnc, &
-                                 beta, Skw_denom_coef, w_tol, &
+                                 clubb_params, w_tol, &
                                  up3 )
 
         call xp3_LG_2005_ansatz( nz, ngrdcol, Skw_zt, vpwp_zt, wp2_zt, &
                                  vp2_zt, xp3_coef_fnc, &
-                                 beta, Skw_denom_coef, w_tol, &
+                                 clubb_params, w_tol, &
                                  vp3 )
 
         do j = 1, sclr_dim, 1
           
           wpsclrp_zt(:,:) = zm2zt( nz, ngrdcol, gr, wpsclrp(:,:,j) )
-          sclrp2_zt(:,:)  = max( zm2zt( nz, ngrdcol, gr, sclrp2(:,:,j) ), sclr_tol(j)**2 )
+          sclrp2_zt(:,:)  = zm2zt( nz, ngrdcol, gr, sclrp2(:,:,j), sclr_tol(j)**2 )
 
           call xp3_LG_2005_ansatz( nz, ngrdcol, Skw_zt(:,:), wpsclrp_zt(:,:), wp2_zt(:,:), &
                                    sclrp2_zt(:,:), xp3_coef_fnc(:,:), &
-                                   beta, Skw_denom_coef, sclr_tol(j), &
+                                   clubb_params, sclr_tol(j), &
                                    sclrp3(:,:,j) )
         end do ! i = 1, sclr_dim
 
@@ -2515,8 +2365,8 @@ module advance_clubb_core_module
       !   and quantities integrated over that PDF, including
       !   quantities related to clouds, buoyancy, and turbulent advection.
       call pdf_closure_driver( gr, nz, ngrdcol,                             & ! Intent(in)
-                               dt, hydromet_dim, wprtp,                     & ! Intent(in)
-                               thlm, wpthlp, rtp2, rtp3,                    & ! Intent(in)
+                               dt, hydromet_dim, sclr_dim, sclr_tol,        & ! Intent(in)
+                               wprtp, thlm, wpthlp, rtp2, rtp3,             & ! Intent(in)
                                thlp2, thlp3, rtpthlp, wp2,                  & ! Intent(in)
                                wp3, wm_zm, wm_zt,                           & ! Intent(in)
                                um, up2, upwp, up3,                          & ! Intent(in)
@@ -2531,6 +2381,7 @@ module advance_clubb_core_module
                                l_samp_stats_in_pdf_call,                    & ! Intent(in)
                                clubb_params,                                & ! Intent(in)
                                clubb_config_flags%iiPDF_type,               & ! Intent(in)
+                               clubb_config_flags%saturation_formula,       & ! Intent(in)
                                clubb_config_flags%l_predict_upwp_vpwp,      & ! Intent(in)
                                clubb_config_flags%l_rtm_nudge,              & ! Intent(in)
                                clubb_config_flags%l_trapezoidal_rule_zt,    & ! Intent(in)
@@ -2538,8 +2389,10 @@ module advance_clubb_core_module
                                clubb_config_flags%l_call_pdf_closure_twice, & ! Intent(in)
                                clubb_config_flags%l_use_cloud_cover,        & ! Intent(in)
                                clubb_config_flags%l_rcm_supersat_adj,       & ! Intent(in)
-                               rtm,                                         & ! Intent(inout)
+                               l_mix_rat_hm,                                & ! Intent(in)
+                               stats_metadata,                              & ! Intent(in)
                                stats_zt, stats_zm,                          & ! Intent(inout)
+                               rtm,                                         & ! Intent(inout)
                                pdf_implicit_coefs_terms,                    & ! Intent(inout)
                                pdf_params, pdf_params_zm,                   & ! Intent(inout)
 #ifdef GFDL
@@ -2589,7 +2442,7 @@ module advance_clubb_core_module
     !#############            ACCUMULATE STATISTICS            #############
     !#######################################################################
 
-    if ( l_stats_samp ) then
+    if ( stats_metadata%l_stats_samp ) then
 
       !$acc update host( wp2, vp2, up2, wprtp, wpthlp, upwp, vpwp, rtp2, thlp2, &
       !$acc              rtpthlp, rtm, thlm, um, vm, wp3, &
@@ -2645,7 +2498,7 @@ module advance_clubb_core_module
       !$acc              wpthvp, wp2thvp, rtpthvp, thlpthvp, &
       !$acc              p_in_Pa, exner, rho, rho_zm, &
       !$acc              rho_ds_zm, rho_ds_zt, thv_ds_zm, thv_ds_zt, &
-      !$acc              wm_zt, wm_zm, rcm, wprcp, rc_coef, rc_coef_zm, &
+      !$acc              wm_zt, wm_zm, rcm, wprcp, rc_coef_zm, rc_coef, &
       !$acc              rcm_zm, rtm_zm, thlm_zm, cloud_frac, ice_supersat_frac, &
       !$acc              cloud_frac_zm, ice_supersat_frac_zm, rcm_in_layer, &
       !$acc              cloud_cover, rcm_supersat_adj, sigma_sqd_w, &
@@ -2659,70 +2512,73 @@ module advance_clubb_core_module
       !$acc              rtprcp, rcp2, em, a3_coef, a3_coef_zt, &
       !$acc              wp3_zm, wp3_on_wp2, wp3_on_wp2_zt, Skw_velocity, &
       !$acc              w_up_in_cloud, w_down_in_cloud, &
-      !$acc              cloudy_updraft_frac, cloudy_downdraft_frac, &
-      !$acc              sclrm, sclrp2, &
-      !$acc              sclrprtp, sclrpthlp, sclrm_forcing, sclrpthvp, &
-      !$acc              wpsclrp, sclrprcp, wp2sclrp, wpsclrp2, wpsclrprtp, &
-      !$acc              wpsclrpthlp, wpedsclrp, edsclrm, edsclrm_forcing )
+      !$acc              cloudy_updraft_frac, cloudy_downdraft_frac )
+
+      !$acc update host( sclrm, sclrp2, sclrprtp, sclrpthlp, sclrm_forcing, &
+      !$acc              sclrpthvp, wpsclrp, sclrprcp, wp2sclrp, wpsclrp2, &
+      !$acc              wpsclrprtp, wpsclrpthlp, wpedsclrp ) &
+      !$acc if ( sclr_dim > 0 )
+
+      !$acc update host( edsclrm, edsclrm_forcing  ) if ( edsclr_dim > 0 )
 
       do i = 1, ngrdcol
 
-        call stat_end_update( nz, iwp2_bt, wp2(i,:) / dt, & ! intent(in)
+        call stat_end_update( nz, stats_metadata%iwp2_bt, wp2(i,:) / dt, & ! intent(in)
                               stats_zm(i) )           ! intent(inout)
-        call stat_end_update( nz, ivp2_bt, vp2(i,:) / dt, & ! intent(in)
+        call stat_end_update( nz, stats_metadata%ivp2_bt, vp2(i,:) / dt, & ! intent(in)
                               stats_zm(i) )           ! intent(inout)
-        call stat_end_update( nz, iup2_bt, up2(i,:) / dt, & ! intent(in)
+        call stat_end_update( nz, stats_metadata%iup2_bt, up2(i,:) / dt, & ! intent(in)
                               stats_zm(i) )           ! intent(inout)
-        call stat_end_update( nz, iwprtp_bt, wprtp(i,:) / dt, & ! intent(in)
+        call stat_end_update( nz, stats_metadata%iwprtp_bt, wprtp(i,:) / dt, & ! intent(in)
                               stats_zm(i) )               ! intent(inout)
-        call stat_end_update( nz, iwpthlp_bt, wpthlp(i,:) / dt, & ! intent(in)
+        call stat_end_update( nz, stats_metadata%iwpthlp_bt, wpthlp(i,:) / dt, & ! intent(in)
                               stats_zm(i) )                 ! intent(inout)
         if ( clubb_config_flags%l_predict_upwp_vpwp ) then
-           call stat_end_update( nz, iupwp_bt, upwp(i,:) / dt, & ! intent(in)
+           call stat_end_update( nz, stats_metadata%iupwp_bt, upwp(i,:) / dt, & ! intent(in)
                                  stats_zm(i) )             ! intent(inout)
-           call stat_end_update( nz, ivpwp_bt, vpwp(i,:) / dt, & ! intent(in)
+           call stat_end_update( nz, stats_metadata%ivpwp_bt, vpwp(i,:) / dt, & ! intent(in)
                                  stats_zm(i) )             ! intent(inout)
         endif ! l_predict_upwp_vpwp
-        call stat_end_update( nz, irtp2_bt, rtp2(i,:) / dt, & ! intent(in)
+        call stat_end_update( nz, stats_metadata%irtp2_bt, rtp2(i,:) / dt, & ! intent(in)
                               stats_zm(i) )             ! intent(inout)
-        call stat_end_update( nz, ithlp2_bt, thlp2(i,:) / dt, & ! intent(in)
+        call stat_end_update( nz, stats_metadata%ithlp2_bt, thlp2(i,:) / dt, & ! intent(in)
                               stats_zm(i) )               ! intent(inout)
-        call stat_end_update( nz, irtpthlp_bt, rtpthlp(i,:) / dt, & ! intent(in)
+        call stat_end_update( nz, stats_metadata%irtpthlp_bt, rtpthlp(i,:) / dt, & ! intent(in)
                               stats_zm(i) )                   ! intent(inout)
  
-        call stat_end_update( nz, irtm_bt, rtm(i,:) / dt, & ! intent(in)
+        call stat_end_update( nz, stats_metadata%irtm_bt, rtm(i,:) / dt, & ! intent(in)
                               stats_zt(i) )           ! intent(inout)
-        call stat_end_update( nz, ithlm_bt, thlm(i,:) / dt, & ! intent(in)
+        call stat_end_update( nz, stats_metadata%ithlm_bt, thlm(i,:) / dt, & ! intent(in)
                               stats_zt(i) )             ! intent(inout)
-        call stat_end_update( nz, ium_bt, um(i,:) / dt, & ! intent(in)
+        call stat_end_update( nz, stats_metadata%ium_bt, um(i,:) / dt, & ! intent(in)
                               stats_zt(i) )         ! intent(inout)
-        call stat_end_update( nz, ivm_bt, vm(i,:) / dt, & ! intent(in)
+        call stat_end_update( nz, stats_metadata%ivm_bt, vm(i,:) / dt, & ! intent(in)
                               stats_zt(i) )         ! intent(inout)
-        call stat_end_update( nz, iwp3_bt, wp3(i,:) / dt, & ! intent(in)
+        call stat_end_update( nz, stats_metadata%iwp3_bt, wp3(i,:) / dt, & ! intent(in)
                               stats_zt(i) )           ! intent(inout)
       end do
 
-      if ( iwpthlp_zt > 0 ) then
+      if ( stats_metadata%iwpthlp_zt > 0 ) then
         wpthlp_zt(:,:)  = zm2zt( nz, ngrdcol, gr, wpthlp(:,:) )
       end if
 
-      if ( iwprtp_zt > 0 ) then
+      if ( stats_metadata%iwprtp_zt > 0 ) then
         wprtp_zt(:,:)   = zm2zt( nz, ngrdcol, gr, wprtp(:,:) )
       end if
 
-      if ( iup2_zt > 0 ) then
-        up2_zt(:,:) = max( zm2zt( nz, ngrdcol, gr, up2(:,:) ), w_tol_sqd )
+      if ( stats_metadata%iup2_zt > 0 ) then
+        up2_zt(:,:) = zm2zt( nz, ngrdcol, gr, up2(:,:), w_tol_sqd )
       end if
 
-      if (ivp2_zt > 0 ) then
-        vp2_zt(:,:) = max( zm2zt( nz, ngrdcol, gr, vp2(:,:) ), w_tol_sqd )
+      if (stats_metadata%ivp2_zt > 0 ) then
+        vp2_zt(:,:) = zm2zt( nz, ngrdcol, gr, vp2(:,:), w_tol_sqd )
       end if
 
-      if ( iupwp_zt > 0 ) then
+      if ( stats_metadata%iupwp_zt > 0 ) then
         upwp_zt(:,:) = zm2zt( nz, ngrdcol, gr, upwp(:,:) )
       end if
 
-      if ( ivpwp_zt > 0 ) then
+      if ( stats_metadata%ivpwp_zt > 0 ) then
         vpwp_zt(:,:) = zm2zt( nz, ngrdcol, gr, vpwp(:,:) )
       end if
       
@@ -2740,7 +2596,8 @@ module advance_clubb_core_module
                                               pdf_params_zm_single_col(i) )
         
         call stats_accumulate( &
-               nz, gr%invrs_dzm(i,:), gr%zt(i,:), gr%dzm(i,:), gr%dzt(i,:), dt, & ! intent(in)
+               nz, sclr_dim, edsclr_dim, &
+               gr%invrs_dzm(i,:), gr%zt(i,:), gr%dzm(i,:), gr%dzt(i,:), dt, & ! intent(in)
                um(i,:), vm(i,:), upwp(i,:), vpwp(i,:), up2(i,:), vp2(i,:),     & ! intent(in)
                thlm(i,:), rtm(i,:), wprtp(i,:), wpthlp(i,:),                              & ! intent(in)
                wp2(i,:), wp3(i,:), rtp2(i,:), rtp3(i,:), thlp2(i,:), thlp3(i,:), rtpthlp(i,:),           & ! intent(in)
@@ -2766,26 +2623,31 @@ module advance_clubb_core_module
                sclrprtp(i,:,:), sclrpthlp(i,:,:), sclrm_forcing(i,:,:), sclrpthvp(i,:,:),         & ! intent(in)
                wpsclrp(i,:,:), sclrprcp(i,:,:), wp2sclrp(i,:,:), wpsclrp2(i,:,:), wpsclrprtp(i,:,:),     & ! intent(in)
                wpsclrpthlp(i,:,:), wpedsclrp(i,:,:), edsclrm(i,:,:), edsclrm_forcing(i,:,:),      & ! intent(in)
-               stats_zt(i), stats_zm(i), stats_sfc(i) )                          ! intent(inout)
+               clubb_config_flags%saturation_formula,                                         & ! intent(in)
+               stats_metadata,                                                               & ! intent(in)
+               stats_zt(i), stats_zm(i), stats_sfc(i) )                                           ! intent(inout)
       end do
-    endif ! l_stats_samp
+    endif ! stats_metadata%l_stats_samp
 
     if ( clubb_at_least_debug_level( 2 ) ) then
 
-      !$acc update host( thlm_forcing, rtm_forcing, um_forcing, &
-      !$acc              vm_forcing, wm_zm, wm_zt, p_in_Pa, &
-      !$acc              rho_zm, rho, exner, rho_ds_zm, &
-      !$acc              rho_ds_zt, invrs_rho_ds_zm, invrs_rho_ds_zt, &
-      !$acc              thv_ds_zm, thv_ds_zt, wpthlp_sfc, wprtp_sfc, upwp_sfc, &
-      !$acc              vpwp_sfc, um, upwp, vm, vpwp, up2, vp2, &
-      !$acc              rtm, wprtp, thlm, wpthlp, wp2, wp3, &
-      !$acc              rtp2, thlp2, rtpthlp, &
-      !$acc              wpsclrp_sfc, wpedsclrp_sfc, sclrm, wpsclrp, sclrp2, &
-      !$acc              sclrprtp, sclrpthlp, sclrm_forcing, edsclrm, edsclrm_forcing )
+      !$acc update host( thlm_forcing, rtm_forcing, um_forcing, vm_forcing, &
+      !$acc              wm_zm, wm_zt, p_in_Pa, rho_zm, rho, exner, rho_ds_zm, &
+      !$acc              rho_ds_zt, invrs_rho_ds_zm, invrs_rho_ds_zt, thv_ds_zm, &
+      !$acc              thv_ds_zt, wpthlp_sfc, wprtp_sfc, upwp_sfc, vpwp_sfc, &
+      !$acc              um, upwp, vm, vpwp, up2, vp2, rtm, wprtp, thlm, wpthlp, &
+      !$acc              wp2, wp3, rtp2, thlp2, rtpthlp )
+
+      !$acc update host( wpsclrp_sfc, wpedsclrp_sfc, sclrm, wpsclrp, &
+      !$acc              sclrp2, sclrprtp, sclrpthlp, sclrm_forcing ) &
+      !$acc if ( sclr_dim > 0 )
+
+      !$acc update host( edsclrm, edsclrm_forcing  ) if ( edsclr_dim > 0 )
 
       do i = 1, ngrdcol
         call parameterization_check( &
-             nz, thlm_forcing(i,:), rtm_forcing(i,:), um_forcing(i,:),                         & ! intent(in)
+             nz, sclr_dim, edsclr_dim, &
+             thlm_forcing(i,:), rtm_forcing(i,:), um_forcing(i,:),                         & ! intent(in)
              vm_forcing(i,:), wm_zm(i,:), wm_zt(i,:), p_in_Pa(i,:),                                 & ! intent(in)
              rho_zm(i,:), rho(i,:), exner(i,:), rho_ds_zm(i,:),                                     & ! intent(in)
              rho_ds_zt(i,:), invrs_rho_ds_zm(i,:), invrs_rho_ds_zt(i,:),                       & ! intent(in)
@@ -2803,12 +2665,12 @@ module advance_clubb_core_module
         write(fstderr,*) "Error occurred during parameterization_check at"// &
                          " end of advance_clubb_core"
         err_code_out = err_code
-        !return
+        return
       end if
 
     end if
 
-    if ( l_stats .and. l_stats_samp ) then
+    if ( stats_metadata%l_stats .and. stats_metadata%l_stats_samp ) then
 
       !$acc update host( wm_zt, wm_zm, rho_ds_zm, wprtp, wprtp_sfc, rho_ds_zt, &
       !$acc              rtm, rtm_forcing, thlm, thlm_forcing )
@@ -2821,7 +2683,7 @@ module advance_clubb_core_module
           ! Calculate the spurious source for rtm
           rtm_flux_top(i) = rho_ds_zm(i,nz) * wprtp(i,nz)
 
-          if ( .not. l_host_applies_sfc_fluxes ) then
+          if ( .not. clubb_config_flags%l_host_applies_sfc_fluxes ) then
             rtm_flux_sfc(i) = rho_ds_zm(i,1) * wprtp_sfc(i)
           else
             rtm_flux_sfc(i) = 0.0_core_rknd
@@ -2845,7 +2707,7 @@ module advance_clubb_core_module
           ! Calculate the spurious source for thlm
           thlm_flux_top(i) = rho_ds_zm(i,nz) * wpthlp(i,nz)
 
-          if ( .not. l_host_applies_sfc_fluxes ) then
+          if ( .not. clubb_config_flags%l_host_applies_sfc_fluxes ) then
             thlm_flux_sfc(i) = rho_ds_zm(i,1) * wpthlp_sfc(i)
           else
             thlm_flux_sfc(i) = 0.0_core_rknd
@@ -2873,14 +2735,19 @@ module advance_clubb_core_module
 
       ! Write the var to stats
       do i = 1, ngrdcol
-        call stat_update_var_pt( irtm_spur_src, 1, rtm_spur_src(i),   & ! intent(in)
+        call stat_update_var_pt( stats_metadata%irtm_spur_src, 1, rtm_spur_src(i),   & ! intent(in)
                                  stats_sfc(i) )                               ! intent(inout)
-        call stat_update_var_pt( ithlm_spur_src, 1, thlm_spur_src(i), & ! intent(in)
+        call stat_update_var_pt( stats_metadata%ithlm_spur_src, 1, thlm_spur_src(i), & ! intent(in)
                                  stats_sfc(i) )                               ! intent(inout)
       end do
     end if
 
-    !$acc end data
+    !$acc exit data if( sclr_dim > 0 ) &
+    !$acc           delete( sclrprcp, wp2sclrp, &
+    !$acc                   wpsclrp2, wpsclrprtp, wpsclrpthlp, wpsclrp_zt, sclrp2_zt )
+
+    !$acc exit data if( edsclr_dim > 0 ) &
+    !$acc           delete( wpedsclrp )
 
     !$acc exit data delete( Skw_zm, Skw_zt, thvm, thvm_zm, ddzm_thvm_zm, rtprcp, rcp2, &
     !$acc                   wpthlp2, wprtp2, wprtpthlp, wp2rcp, wp3_zm, Lscale, Lscale_up, &
@@ -2888,7 +2755,7 @@ module advance_clubb_core_module
     !$acc                   wp2_zt, thlp2_zt, wpthlp_zt, &
     !$acc                   wprtp_zt, rtp2_zt, rtpthlp_zt, up2_zt, vp2_zt, upwp_zt, vpwp_zt, &
     !$acc                   Skw_velocity, a3_coef, a3_coef_zt, wp3_on_wp2, wp3_on_wp2_zt, &
-    !$acc                   rc_coef_zm, Km_zm, Kmh_zm, gamma_Skw_fnc, sigma_sqd_w, sigma_sqd_w_tmp, &
+    !$acc                   rc_coef, Km_zm, Kmh_zm, gamma_Skw_fnc, sigma_sqd_w, sigma_sqd_w_tmp, &
     !$acc                   sqrt_em_zt, xp3_coef_fnc, w_1_zm, w_2_zm, varnce_w_1_zm, varnce_w_2_zm, &
     !$acc                   mixt_frac_zm, rcp2_zt, cloud_frac_zm, ice_supersat_frac_zm, rtm_zm, &
     !$acc                   thlm_zm, rcm_zm, thlm1000, thlm700, &
@@ -2899,77 +2766,73 @@ module advance_clubb_core_module
     !$acc                   invrs_tau_sfc, invrs_tau_zt, invrs_tau_wp3_zt, Cx_fnc_Richardson, &
     !$acc                   brunt_vaisala_freq_sqd, brunt_vaisala_freq_sqd_mixed, &
     !$acc                   brunt_vaisala_freq_sqd_dry, brunt_vaisala_freq_sqd_moist, &
-    !$acc                   brunt_vaisala_freq_sqd_plus, brunt_vaisala_freq_sqd_splat, &
-    !$acc                   brunt_vaisala_freq_sqd_zt, sqrt_Ri_zm, Lscale_max, &
-    !$acc                   tau_max_zm, tau_max_zt, newmu, lhs_splat_wp2, lhs_splat_wp3 )
-
-    !$acc exit data if( sclr_dim > 0 ) &
-    !$acc           delete( wpedsclrp, sclrprcp, wp2sclrp, &
-    !$acc                   wpsclrp2, wpsclrprtp, wpsclrpthlp, wpsclrp_zt, sclrp2_zt )
-
-    !$acc exit data if( sclr_dim > 0 ) &
-    !$acc           delete( hydromet, wphydrometp, wp2hmp, rtphmp_zt, thlphmp_zt )
-
+    !$acc                   brunt_vaisala_freq_sqd_splat, &
+    !$acc                   brunt_vaisala_freq_sqd_zt, Ri_zm, Lscale_max, &
+    !$acc                   tau_max_zm, tau_max_zt, mu, lhs_splat_wp2, lhs_splat_wp3 )
+    
     return
 
   end subroutine advance_clubb_core
 
   !=============================================================================
-  subroutine pdf_closure_driver( gr, nz, ngrdcol,               & ! Intent(in)
-                                 dt, hydromet_dim, wprtp,       & ! Intent(in)
-                                 thlm, wpthlp, rtp2, rtp3,      & ! Intent(in)
-                                 thlp2, thlp3, rtpthlp, wp2,    & ! Intent(in)
-                                 wp3, wm_zm, wm_zt,             & ! Intent(in)
-                                 um, up2, upwp, up3,            & ! Intent(in)
-                                 vm, vp2, vpwp, vp3,            & ! Intent(in)
-                                 p_in_Pa, exner,                & ! Intent(in)
-                                 thv_ds_zm, thv_ds_zt, rtm_ref, & ! Intent(in)
-!                                rfrzm, hydromet,               &
-                                 wphydrometp,                   & ! Intent(in)
-                                 wp2hmp, rtphmp_zt, thlphmp_zt, & ! Intent(in)
-                                 sclrm, wpsclrp, sclrp2,        & ! Intent(in)
-                                 sclrprtp, sclrpthlp, sclrp3,   & ! Intent(in)
-                                 l_samp_stats_in_pdf_call,      & ! Intent(in)
-                                 clubb_params,                  & ! Intent(in)
-                                 iiPDF_type,                    & ! Intent(in)
-                                 l_predict_upwp_vpwp,           & ! Intent(in)
-                                 l_rtm_nudge,                   & ! Intent(in)
-                                 l_trapezoidal_rule_zt,         & ! Intent(in)
-                                 l_trapezoidal_rule_zm,         & ! Intent(in)
-                                 l_call_pdf_closure_twice,      & ! Intent(in)
-                                 l_use_cloud_cover,             & ! Intent(in)
-                                 l_rcm_supersat_adj,            & ! Intent(in)
-                                 rtm,                           & ! Intent(inout)
-                                 stats_zt, stats_zm,            & ! Intent(inout)
-                                 pdf_implicit_coefs_terms,      & ! Intent(inout)
-                                 pdf_params, pdf_params_zm,     & ! Intent(inout)
+  subroutine pdf_closure_driver( gr, nz, ngrdcol,                         & ! Intent(in)
+                                 dt, hydromet_dim, sclr_dim, sclr_tol,    & ! Intent(in)
+                                 wprtp, thlm, wpthlp, rtp2, rtp3,         & ! Intent(in)
+                                 thlp2, thlp3, rtpthlp, wp2,              & ! Intent(in)
+                                 wp3, wm_zm, wm_zt,                       & ! Intent(in)
+                                 um, up2, upwp, up3,                      & ! Intent(in)
+                                 vm, vp2, vpwp, vp3,                      & ! Intent(in)
+                                 p_in_Pa, exner,                          & ! Intent(in)
+                                 thv_ds_zm, thv_ds_zt, rtm_ref,           & ! Intent(in)
+!                                rfrzm, hydromet,                         &
+                                 wphydrometp,                             & ! Intent(in)
+                                 wp2hmp, rtphmp_zt, thlphmp_zt,           & ! Intent(in)
+                                 sclrm, wpsclrp, sclrp2,                  & ! Intent(in)
+                                 sclrprtp, sclrpthlp, sclrp3,             & ! Intent(in)
+                                 l_samp_stats_in_pdf_call,                & ! Intent(in)
+                                 clubb_params,                            & ! Intent(in)
+                                 iiPDF_type,                              & ! Intent(in)
+                                 saturation_formula,                      & ! Intent(in)
+                                 l_predict_upwp_vpwp,                     & ! Intent(in)
+                                 l_rtm_nudge,                             & ! Intent(in)
+                                 l_trapezoidal_rule_zt,                   & ! Intent(in)
+                                 l_trapezoidal_rule_zm,                   & ! Intent(in)
+                                 l_call_pdf_closure_twice,                & ! Intent(in)
+                                 l_use_cloud_cover,                       & ! Intent(in)
+                                 l_rcm_supersat_adj,                      & ! Intent(in
+                                 l_mix_rat_hm,                            & ! Intent(in)
+                                 stats_metadata,                          & ! Intent(in)
+                                 stats_zt, stats_zm,                      & ! Intent(inout)
+                                 rtm,                                     & ! Intent(inout)
+                                 pdf_implicit_coefs_terms,                & ! Intent(inout)
+                                 pdf_params, pdf_params_zm,               & ! Intent(inout)
 #ifdef GFDL
-                                 RH_crit(k, : , :),             & ! Intent(inout)
-                                 do_liquid_only_in_clubb,       & ! Intent(in)
+                                 RH_crit(k, : , :),                       & ! Intent(inout)
+                                 do_liquid_only_in_clubb,                 & ! Intent(in)
 #endif
-                                 rcm, cloud_frac,               & ! Intent(out)
-                                 ice_supersat_frac, wprcp,      & ! Intent(out)
-                                 sigma_sqd_w, wpthvp, wp2thvp,  & ! Intent(out)
-                                 rtpthvp, thlpthvp, rc_coef,    & ! Intent(out)
-                                 rcm_in_layer, cloud_cover,     & ! Intent(out)
-                                 rcp2_zt, thlprcp,              & ! Intent(out)
-                                 rc_coef_zm, sclrpthvp,         & ! Intent(out)
-                                 wpup2, wpvp2,                  & ! Intent(out)
-                                 wp2up2, wp2vp2, wp4,           & ! Intent(out)
-                                 wp2rtp, wprtp2, wp2thlp,       & ! Intent(out)
-                                 wpthlp2, wprtpthlp, wp2rcp,    & ! Intent(out)
-                                 rtprcp, rcp2,                  & ! Intent(out)
-                                 uprcp, vprcp,                  & ! Intent(out)
-                                 w_up_in_cloud, w_down_in_cloud,& ! Intent(out)
-                                 cloudy_updraft_frac,           & ! Intent(out)
-                                 cloudy_downdraft_frac,         & ! intent(out)
-                                 Skw_velocity,                  & ! Intent(out)
-                                 cloud_frac_zm,                 & ! Intent(out)
-                                 ice_supersat_frac_zm,          & ! Intent(out)
-                                 rtm_zm, thlm_zm, rcm_zm,       & ! Intent(out)
-                                 rcm_supersat_adj,              & ! Intent(out)
-                                 wp2sclrp, wpsclrp2, sclrprcp,  & ! Intent(out)
-                                 wpsclrprtp, wpsclrpthlp )        ! Intent(out)
+                                 rcm, cloud_frac,                         & ! Intent(out)
+                                 ice_supersat_frac, wprcp,                & ! Intent(out)
+                                 sigma_sqd_w, wpthvp, wp2thvp,            & ! Intent(out)
+                                 rtpthvp, thlpthvp, rc_coef,              & ! Intent(out)
+                                 rcm_in_layer, cloud_cover,               & ! Intent(out)
+                                 rcp2_zt, thlprcp,                        & ! Intent(out)
+                                 rc_coef_zm, sclrpthvp,                   & ! Intent(out)
+                                 wpup2, wpvp2,                            & ! Intent(out)
+                                 wp2up2, wp2vp2, wp4,                     & ! Intent(out)
+                                 wp2rtp, wprtp2, wp2thlp,                 & ! Intent(out)
+                                 wpthlp2, wprtpthlp, wp2rcp,              & ! Intent(out)
+                                 rtprcp, rcp2,                            & ! Intent(out)
+                                 uprcp, vprcp,                            & ! Intent(out)
+                                 w_up_in_cloud, w_down_in_cloud,          & ! Intent(out)
+                                 cloudy_updraft_frac,                     & ! Intent(out)
+                                 cloudy_downdraft_frac,                   & ! intent(out)
+                                 Skw_velocity,                            & ! Intent(out)
+                                 cloud_frac_zm,                           & ! Intent(out)
+                                 ice_supersat_frac_zm,                    & ! Intent(out)
+                                 rtm_zm, thlm_zm, rcm_zm,                 & ! Intent(out)
+                                 rcm_supersat_adj,                        & ! Intent(out)
+                                 wp2sclrp, wpsclrp2, sclrprcp,            & ! Intent(out)
+                                 wpsclrprtp, wpsclrpthlp )                  ! Intent(out)
 
     use grid_class, only: &
         grid, & ! Type
@@ -2996,9 +2859,7 @@ module advance_clubb_core_module
         init_pdf_implicit_coefs_terms ! Procedure
 
     use parameters_model, only: &
-        sclr_dim,               & ! Variable(s)
-        sclr_tol,               &
-        ts_nudge,               &
+        ts_nudge,               & ! Variable(s)
         rtm_min,                &
         rtm_nudge_max_altitude
 
@@ -3043,27 +2904,7 @@ module advance_clubb_core_module
         stat_update_var_pt
 
     use stats_variables, only: &
-        l_stats_samp,        & ! Variable(s)
-        iSkw_zm,             &
-        iSkw_zt,             &
-        iSkrt_zm,            &
-        iSkrt_zt,            &
-        iSkthl_zm,           &
-        iSkthl_zt,           &
-        iSkw_velocity,       &
-        igamma_Skw_fnc,      &
-        iF_w,                &
-        iF_rt,               &
-        iF_thl,              &
-        imin_F_w,            &
-        imax_F_w,            &
-        imin_F_rt,           &
-        imax_F_rt,           &
-        imin_F_thl,          &
-        imax_F_thl,          &
-        ivprcp,  &
-        iuprcp,  &
-        ircp2               
+        stats_metadata_type
 
     use clubb_precision, only: &
         core_rknd    ! Variable(s)
@@ -3084,7 +2925,11 @@ module advance_clubb_core_module
       dt  ! Current timestep duration    [s]
 
     integer, intent(in) :: &
-      hydromet_dim      ! Total number of hydrometeors          [#]
+      hydromet_dim,   & ! Total number of hydrometeor species       [#]
+      sclr_dim          ! Number of passive scalars                 [#]
+
+    real( kind = core_rknd ), intent(in), dimension(sclr_dim) :: & 
+      sclr_tol          ! Threshold(s) on the passive scalars  [units vary]
 
     real( kind = core_rknd ), dimension(ngrdcol,nz), intent(in) ::  &
       !rtm,       & ! total water mixing ratio, r_t (thermo. levels) [kg/kg]
@@ -3139,14 +2984,18 @@ module advance_clubb_core_module
     logical, intent(in) :: &
       l_samp_stats_in_pdf_call    ! Sample stats in this call to this subroutine
 
-    real( kind = core_rknd ), dimension(nparams), intent(in) :: &
+    real( kind = core_rknd ), dimension(ngrdcol,nparams), intent(in) :: &
       clubb_params    ! Array of CLUBB's tunable parameters    [units vary]
 
     integer, intent(in) :: &
-      iiPDF_type    ! Selected option for the two-component normal (double
-                    ! Gaussian) PDF type to use for the w, rt, and theta-l (or
-                    ! w, chi, and eta) portion of CLUBB's multivariate,
-                    ! two-component PDF.
+      iiPDF_type,      & ! Selected option for the two-component normal (double
+                         ! Gaussian) PDF type to use for the w, rt, and theta-l (or
+                         ! w, chi, and eta) portion of CLUBB's multivariate,
+                         ! two-component PDF.
+      saturation_formula ! Integer that stores the saturation formula to be used
+
+    logical, dimension(hydromet_dim), intent(in) :: &
+      l_mix_rat_hm   ! if true, then the quantity is a hydrometeor mixing ratio
 
     logical, intent(in) :: &
       l_predict_upwp_vpwp,      & ! Flag to predict <u'w'> and <v'w'> along with <u> and <v>
@@ -3171,13 +3020,16 @@ module advance_clubb_core_module
                                   ! rcm to help increase cloudiness at coarser grid resolutions.
       l_rcm_supersat_adj          ! Add excess supersaturated vapor to cloud water
 
-    !------------------------------- InOut Variables -------------------------------
-    real( kind = core_rknd ), dimension(ngrdcol,nz), intent(inout) ::  &
-      rtm    ! total water mixing ratio, r_t (thermo. levels) [kg/kg]
+    type (stats_metadata_type), intent(in) :: &
+      stats_metadata
 
+    !------------------------------- InOut Variables -------------------------------
     type (stats), target, dimension(ngrdcol), intent(inout) :: &
       stats_zt, &
       stats_zm
+
+    real( kind = core_rknd ), dimension(ngrdcol,nz), intent(inout) ::  &
+      rtm    ! total water mixing ratio, r_t (thermo. levels) [kg/kg]
 
     type(implicit_coefs_terms), intent(inout) :: &
       pdf_implicit_coefs_terms    ! Implicit coefs / explicit terms [units vary]
@@ -3390,9 +3242,7 @@ module advance_clubb_core_module
     real( kind = core_rknd ) :: &
       gamma_coef,     & ! CLUBB tunable parameter gamma_coef
       gamma_coefb,    & ! CLUBB tunable parameter gamma_coefb
-      gamma_coefc,    & ! CLUBB tunable parameter gamma_coefc
-      Skw_denom_coef, & ! CLUBB tunable parameter Skw_denom_coef
-      Skw_max_mag       ! CLUBB tunable parameter Skw_max_mag
+      gamma_coefc       ! CLUBB tunable parameter gamma_coefc
       
     real( kind = core_rknd ), dimension(ngrdcol, nz) :: &
       um_zm, &
@@ -3436,126 +3286,97 @@ module advance_clubb_core_module
     ! compute Skw, Skrt, Skthl, Sku, Skv, and Sksclr for both the momentum and
     ! thermodynamic grid levels.
     !---------------------------------------------------------------------------
-    wp2_zt(:,:)   = zm2zt( nz, ngrdcol, gr, wp2(:,:) ) ! Positive definite quantity
+    wp2_zt(:,:)   = zm2zt( nz, ngrdcol, gr, wp2(:,:), w_tol_sqd ) ! Positive definite quantity
     wp3_zm(:,:)   = zt2zm( nz, ngrdcol, gr, wp3(:,:) )
-    thlp2_zt(:,:) = zm2zt( nz, ngrdcol, gr, thlp2(:,:) ) ! Positive definite quantity
+    thlp2_zt(:,:) = zm2zt( nz, ngrdcol, gr, thlp2(:,:), thl_tol**2 ) ! Positive definite quantity
     thlp3_zm(:,:) = zt2zm( nz, ngrdcol, gr, thlp3(:,:) )
-    rtp2_zt(:,:)  = zm2zt( nz, ngrdcol, gr, rtp2(:,:) ) ! Positive definite quantity
+    rtp2_zt(:,:)  = zm2zt( nz, ngrdcol, gr, rtp2(:,:), rt_tol**2 ) ! Positive definite quantity
     rtp3_zm(:,:)  = zt2zm( nz, ngrdcol, gr, rtp3(:,:) )
-    up2_zt(:,:)   = zm2zt( nz, ngrdcol, gr, up2(:,:) ) ! Positive definite quantity
+    up2_zt(:,:)   = zm2zt( nz, ngrdcol, gr, up2(:,:), w_tol_sqd ) ! Positive definite quantity
     up3_zm(:,:)   = zt2zm( nz, ngrdcol, gr, up3(:,:) )
-    vp2_zt(:,:)   = zm2zt( nz, ngrdcol, gr, vp2(:,:) ) ! Positive definite quantity
+    vp2_zt(:,:)   = zm2zt( nz, ngrdcol, gr, vp2(:,:), w_tol_sqd ) ! Positive definite quantity
     vp3_zm(:,:)   = zt2zm( nz, ngrdcol, gr, vp3(:,:) )
 
-    !$acc parallel loop gang vector collapse(2) default(present)
-    do k = 1, nz
-      do i = 1, ngrdcol
-        wp2_zt(i,k)   = max( wp2_zt(i,k), w_tol_sqd )
-        thlp2_zt(i,k) = max( thlp2_zt(i,k), thl_tol**2 )
-        rtp2_zt(i,k)  = max( rtp2_zt(i,k), rt_tol**2 )
-        up2_zt(i,k)   = max( up2_zt(i,k), w_tol_sqd )
-        vp2_zt(i,k)   = max( vp2_zt(i,k), w_tol_sqd )
-      end do
-    end do
-    !$acc end parallel loop
-
     do j = 1, sclr_dim, 1
-      sclrp2_zt(:,:,j) = zm2zt( nz, ngrdcol, gr, sclrp2(:,:,j) ) ! Pos. def. quantity
+      sclrp2_zt(:,:,j) = zm2zt( nz, ngrdcol, gr, sclrp2(:,:,j), sclr_tol(j)**2 ) ! Pos. def. quantity
       sclrp3_zm(:,:,j) = zt2zm( nz, ngrdcol, gr, sclrp3(:,:,j) )
-
-      !$acc parallel loop gang vector collapse(2) default(present)
-      do k = 1, nz
-        do i = 1, ngrdcol
-          sclrp2_zt(i,k,j)   = max( sclrp2_zt(i,k,j), sclr_tol(j)**2 )
-        end do
-      end do
-      !$acc end parallel loop
-
     end do ! i = 1, sclr_dim, 1
 
-    Skw_denom_coef = clubb_params(iSkw_denom_coef)
-    Skw_max_mag = clubb_params(iSkw_max_mag)
-
     call Skx_func( nz, ngrdcol, wp2_zt, wp3, &
-                   w_tol, Skw_denom_coef, Skw_max_mag, &
+                   w_tol, clubb_params, &
                    Skw_zt )
                    
     call Skx_func( nz, ngrdcol, wp2, wp3_zm, &
-                   w_tol, Skw_denom_coef, Skw_max_mag, &
+                   w_tol, clubb_params, &
                    Skw_zm )    
                    
     call Skx_func( nz, ngrdcol, thlp2_zt, thlp3, &
-                   thl_tol, Skw_denom_coef, Skw_max_mag, &
+                   thl_tol, clubb_params, &
                    Skthl_zt )  
                    
     call Skx_func( nz, ngrdcol, thlp2, thlp3_zm, &
-                   thl_tol, Skw_denom_coef, Skw_max_mag, &
+                   thl_tol, clubb_params, &
                    Skthl_zm )  
                    
     call Skx_func( nz, ngrdcol, rtp2_zt, rtp3, &
-                   rt_tol, Skw_denom_coef, Skw_max_mag, &
+                   rt_tol, clubb_params, &
                    Skrt_zt )   
                    
     call Skx_func( nz, ngrdcol, rtp2, rtp3_zm, &
-                   rt_tol, Skw_denom_coef, Skw_max_mag, &
+                   rt_tol, clubb_params, &
                    Skrt_zm )   
                    
     call Skx_func( nz, ngrdcol, up2_zt, up3, &
-                   w_tol, Skw_denom_coef, Skw_max_mag, &
+                   w_tol, clubb_params, &
                    Sku_zt )   
                                       
     call Skx_func( nz, ngrdcol, up2, up3_zm, &
-                   w_tol, Skw_denom_coef, Skw_max_mag, &
+                   w_tol, clubb_params, &
                    Sku_zm )   
                    
     call Skx_func( nz, ngrdcol, vp2_zt, vp3, &
-                   w_tol, Skw_denom_coef, Skw_max_mag, &
+                   w_tol, clubb_params, &
                    Skv_zt )   
                    
     call Skx_func( nz, ngrdcol, vp2, vp3_zm, &
-                   w_tol, Skw_denom_coef, Skw_max_mag, &
+                   w_tol, clubb_params, &
                    Skv_zm )      
 
     do j = 1, sclr_dim
       
       call Skx_func( nz, ngrdcol, sclrp2_zt(:,:,j), sclrp3(:,:,j), &
-                     sclr_tol(j), Skw_denom_coef, Skw_max_mag, &
+                     sclr_tol(j), clubb_params, &
                      Sksclr_zt(:,:,j) )   
                      
       call Skx_func( nz, ngrdcol, sclrp2(:,:,j), sclrp3_zm(:,:,j), &
-                     sclr_tol(j), Skw_denom_coef, Skw_max_mag, &
+                     sclr_tol(j), clubb_params, &
                      Sksclr_zm(:,:,j) )  
                       
     end do ! i = 1, sclr_dim, 1
 
-    if ( l_stats_samp .and. l_samp_stats_in_pdf_call ) then
+    if ( stats_metadata%l_stats_samp .and. l_samp_stats_in_pdf_call ) then
 
       !$acc update host( Skw_zt, Skw_zm, Skthl_zt, Skrt_zt, Skrt_zm, Skthl_zm )
 
       do i = 1, ngrdcol
-        call stat_update_var( iSkw_zt, Skw_zt(i,:), & ! In
+        call stat_update_var( stats_metadata%iSkw_zt, Skw_zt(i,:), & ! In
                               stats_zt(i) ) ! In/Out
-        call stat_update_var( iSkw_zm, Skw_zm(i,:), &
+        call stat_update_var( stats_metadata%iSkw_zm, Skw_zm(i,:), &
                               stats_zm(i) ) ! In/Out
-        call stat_update_var( iSkthl_zt, Skthl_zt(i,:), &
+        call stat_update_var( stats_metadata%iSkthl_zt, Skthl_zt(i,:), &
                               stats_zt(i) ) ! In/Out
-        call stat_update_var( iSkthl_zm, Skthl_zm(i,:), &
+        call stat_update_var( stats_metadata%iSkthl_zm, Skthl_zm(i,:), &
                               stats_zm(i) ) ! In/Out
-        call stat_update_var( iSkrt_zt, Skrt_zt(i,:), &
+        call stat_update_var( stats_metadata%iSkrt_zt, Skrt_zt(i,:), &
                               stats_zt(i) ) ! In/Out
-        call stat_update_var( iSkrt_zm, Skrt_zm(i,:), &
+        call stat_update_var( stats_metadata%iSkrt_zm, Skrt_zm(i,:), &
                               stats_zm(i) ) ! In/Out
       end do
     end if
 
-    gamma_coef = clubb_params(igamma_coef)
-    gamma_coefb = clubb_params(igamma_coefb)
-    gamma_coefc = clubb_params(igamma_coefc)
-
     ! The right hand side of this conjunction is only for reducing cpu time,
     ! since the more complicated formula is mathematically equivalent
-    if ( l_gamma_Skw &
-         .and. abs( gamma_coef - gamma_coefb ) > abs( gamma_coef + gamma_coefb ) * eps/2 ) then
+    if ( l_gamma_Skw ) then
 
       !----------------------------------------------------------------
       ! Compute gamma as a function of Skw  - 14 April 06 dschanen
@@ -3563,13 +3384,26 @@ module advance_clubb_core_module
       !$acc parallel loop gang vector collapse(2) default(present)
       do k = 1, nz
         do i = 1, ngrdcol
-           gamma_Skw_fnc(i,k) = gamma_coefb &
-                                + ( gamma_coef - gamma_coefb ) &
-                                  * exp( -one_half * ( Skw_zm(i,k) / gamma_coefc )**2 )
 
-           gamma_Skw_fnc_zt(i,k) = gamma_coefb &
-                                   + ( gamma_coef - gamma_coefb ) &
-                                     * exp( -one_half * ( Skw_zt(i,k) / gamma_coefc )**2 )
+          gamma_coef  = clubb_params(i,igamma_coef)
+          gamma_coefb = clubb_params(i,igamma_coefb)
+          gamma_coefc = clubb_params(i,igamma_coefc)
+
+          if ( abs( gamma_coef - gamma_coefb ) > abs( gamma_coef + gamma_coefb ) * eps/2 ) then
+            gamma_Skw_fnc(i,k) = gamma_coefb &
+                                 + ( gamma_coef - gamma_coefb ) &
+                                   * exp( -one_half * ( Skw_zm(i,k) / gamma_coefc )**2 )
+
+            gamma_Skw_fnc_zt(i,k) = gamma_coefb &
+                                    + ( gamma_coef - gamma_coefb ) &
+                                      * exp( -one_half * ( Skw_zt(i,k) / gamma_coefc )**2 )
+          else
+
+            gamma_Skw_fnc(i,k)    = gamma_coef
+            gamma_Skw_fnc_zt(i,k) = gamma_coef
+
+          end if
+
         end do
       end do
       !$acc end parallel loop
@@ -3579,18 +3413,18 @@ module advance_clubb_core_module
       !$acc parallel loop gang vector collapse(2) default(present)
       do k = 1, nz
         do i = 1, ngrdcol
-          gamma_Skw_fnc(i,k) = gamma_coef
-          gamma_Skw_fnc_zt(i,k) = gamma_coef
+          gamma_Skw_fnc(i,k)    = clubb_params(i,igamma_coef)
+          gamma_Skw_fnc_zt(i,k) = clubb_params(i,igamma_coef)
         end do
       end do
       !$acc end parallel loop
 
     end if
 
-    if ( l_stats_samp .and. l_samp_stats_in_pdf_call ) then
+    if ( stats_metadata%l_stats_samp .and. l_samp_stats_in_pdf_call ) then
       !$acc update host(gamma_Skw_fnc)      
       do i = 1, ngrdcol
-        call stat_update_var( igamma_Skw_fnc, gamma_Skw_fnc(i,:), & ! intent(in)
+        call stat_update_var( stats_metadata%igamma_Skw_fnc, gamma_Skw_fnc(i,:), & ! intent(in)
                               stats_zm(i) )                       ! intent(inout)
       end do
     endif
@@ -3603,49 +3437,29 @@ module advance_clubb_core_module
                               sigma_sqd_w_tmp )
 
     ! Smooth in the vertical using interpolation
-    sigma_sqd_w(:,:) = zm2zt2zm( nz, ngrdcol, gr, sigma_sqd_w_tmp(:,:) ) ! Pos. def. quantity
+    sigma_sqd_w(:,:) = zm2zt2zm( nz, ngrdcol, gr, sigma_sqd_w_tmp(:,:), zero_threshold ) ! Pos. def. quantity
 
 
     ! Interpolate the the stats_zt grid
-    sigma_sqd_w_zt(:,:) = zm2zt( nz, ngrdcol, gr, sigma_sqd_w(:,:) )  ! Pos. def. quantity
-      
-    !$acc parallel loop gang vector collapse(2) default(present)
-    do k = 1, nz
-      do i = 1, ngrdcol
-        sigma_sqd_w(i,k)    = max( zero_threshold, sigma_sqd_w(i,k) ) ! Pos. def. quantity
-        sigma_sqd_w_zt(i,k) = max( sigma_sqd_w_zt(i,k), zero_threshold )  ! Pos. def. quantity
-      end do
-    end do
-    !$acc end parallel loop
+    sigma_sqd_w_zt(:,:) = zm2zt( nz, ngrdcol, gr, sigma_sqd_w(:,:), zero_threshold )  ! Pos. def. quantity
 
     !---------------------------------------------------------------------------
     ! Interpolate thlp2, rtp2, and rtpthlp to thermodynamic levels,
     !---------------------------------------------------------------------------
 
     ! Interpolate variances to the stats_zt grid (statistics and closure)
-    rtp2_zt(:,:)    = zm2zt( nz, ngrdcol, gr, rtp2(:,:) )   ! Positive def. quantity
-    thlp2_zt(:,:)   = zm2zt( nz, ngrdcol, gr, thlp2(:,:) ) ! Positive def. quantity
-    up2_zt(:,:)     = zm2zt( nz, ngrdcol, gr, up2(:,:) )    ! Positive def. quantity
-    vp2_zt(:,:)     = zm2zt( nz, ngrdcol, gr, vp2(:,:) )    ! Positive def. quantity
+    rtp2_zt(:,:)    = zm2zt( nz, ngrdcol, gr, rtp2(:,:), rt_tol**2 )   ! Positive def. quantity
+    thlp2_zt(:,:)   = zm2zt( nz, ngrdcol, gr, thlp2(:,:), thl_tol**2 ) ! Positive def. quantity
+    up2_zt(:,:)     = zm2zt( nz, ngrdcol, gr, up2(:,:), w_tol_sqd )    ! Positive def. quantity
+    vp2_zt(:,:)     = zm2zt( nz, ngrdcol, gr, vp2(:,:), w_tol_sqd )    ! Positive def. quantity
     wprtp_zt(:,:)   = zm2zt( nz, ngrdcol, gr, wprtp(:,:) )
     wpthlp_zt(:,:)  = zm2zt( nz, ngrdcol, gr, wpthlp(:,:) )
     rtpthlp_zt(:,:) = zm2zt( nz, ngrdcol, gr, rtpthlp(:,:) )
     upwp_zt(:,:)    = zm2zt( nz, ngrdcol, gr, upwp(:,:) )
     vpwp_zt(:,:)    = zm2zt( nz, ngrdcol, gr, vpwp(:,:) )
 
-    !$acc parallel loop gang vector collapse(2) default(present)
-    do k = 1, nz
-      do i = 1, ngrdcol
-        rtp2_zt(i,k)    = max( rtp2_zt(i,k), rt_tol**2 )   ! Positive def. quantity
-        thlp2_zt(i,k)   = max( thlp2_zt(i,k), thl_tol**2 ) ! Positive def. quantity
-        up2_zt(i,k)     = max( up2_zt(i,k), w_tol_sqd )    ! Positive def. quantity
-        vp2_zt(i,k)     = max( vp2_zt(i,k), w_tol_sqd )    ! Positive def. quantity
-      end do
-    end do
-    !$acc end parallel loop
-
     ! Compute skewness velocity for stats output purposes
-    if ( iSkw_velocity > 0 ) then
+    if ( stats_metadata%iSkw_velocity > 0 ) then
       !$acc parallel loop gang vector collapse(2) default(present)
       do k = 1, nz
         do i = 1, ngrdcol
@@ -3663,18 +3477,9 @@ module advance_clubb_core_module
     ! Put passive scalar input on the t grid for the PDF
     do j = 1, sclr_dim
       wpsclrp_zt(:,:,j)   = zm2zt( nz, ngrdcol, gr, wpsclrp(:,:,j) )
-      sclrp2_zt(:,:,j)    = zm2zt( nz, ngrdcol, gr, sclrp2(:,:,j) ) ! Pos. def. quantity
+      sclrp2_zt(:,:,j)    = zm2zt( nz, ngrdcol, gr, sclrp2(:,:,j), sclr_tol(j)**2 ) ! Pos. def. quantity
       sclrprtp_zt(:,:,j)  = zm2zt( nz, ngrdcol, gr, sclrprtp(:,:,j) )
       sclrpthlp_zt(:,:,j) = zm2zt( nz, ngrdcol, gr, sclrpthlp(:,:,j) )
-
-      !$acc parallel loop gang vector collapse(2) default(present)
-      do k = 1, nz
-        do i = 1, ngrdcol
-          sclrp2_zt(i,k,j) = max( sclrp2_zt(i,k,j), sclr_tol(j)**2 ) ! Pos. def. quantity
-        end do
-      end do
-      !$acc end parallel loop
-
     end do ! i = 1, sclr_dim, 1
 
     ! Interpolate hydrometeor mixed moments to momentum levels.
@@ -3682,7 +3487,7 @@ module advance_clubb_core_module
       wphydrometp_zt(:,:,j) = zm2zt( nz, ngrdcol, gr, wphydrometp(:,:,j) )
     end do ! i = 1, hydromet_dim, 1
 
-    call pdf_closure( nz, ngrdcol,                         & ! intent(in)
+    call pdf_closure( nz, ngrdcol, sclr_dim, sclr_tol,     & ! intent(in)
            hydromet_dim, p_in_Pa, exner, thv_ds_zt,        & ! intent(in)
            wm_zt, wp2_zt, wp3,                             & ! intent(in)
            Skw_zt, Skthl_zt, Skrt_zt, Sku_zt, Skv_zt,      & ! intent(in)
@@ -3701,7 +3506,10 @@ module advance_clubb_core_module
            wphydrometp_zt, wp2hmp,                         & ! intent(in)
            rtphmp_zt, thlphmp_zt,                          & ! intent(in)
            clubb_params,                                   & ! intent(in)
+           saturation_formula,                             & ! intent(in)
+           stats_metadata,                                 & ! intent(in)
            iiPDF_type,                                     & ! intent(in)
+           l_mix_rat_hm,                                   & ! intent(in)
            sigma_sqd_w_zt,                                 & ! intent(inout)
            pdf_params, pdf_implicit_coefs_terms,           & ! intent(inout)
            wpup2, wpvp2,                                   & ! intent(out)
@@ -3732,26 +3540,26 @@ module advance_clubb_core_module
     endif
 
     ! Stats output
-    if ( l_stats_samp .and. l_samp_stats_in_pdf_call ) then
+    if ( stats_metadata%l_stats_samp .and. l_samp_stats_in_pdf_call ) then
 
       do i = 1, ngrdcol
-        call stat_update_var( iF_w, F_w(i,:), & ! intent(in)
+        call stat_update_var( stats_metadata%iF_w, F_w(i,:), & ! intent(in)
                               stats_zt(i) )   ! intent(inout)
-        call stat_update_var( iF_rt, F_rt(i,:), & ! intent(in)
+        call stat_update_var( stats_metadata%iF_rt, F_rt(i,:), & ! intent(in)
                               stats_zt(i) )     ! intent(inout)
-        call stat_update_var( iF_thl, F_thl(i,:), & ! intent(in)
+        call stat_update_var( stats_metadata%iF_thl, F_thl(i,:), & ! intent(in)
                               stats_zt(i) )       ! intent(inout)
-        call stat_update_var( imin_F_w, min_F_w(i,:), & ! intent(in)
+        call stat_update_var( stats_metadata%imin_F_w, min_F_w(i,:), & ! intent(in)
                               stats_zt(i) )           ! intent(inout)
-        call stat_update_var( imax_F_w, max_F_w(i,:), & ! intent(in)
+        call stat_update_var( stats_metadata%imax_F_w, max_F_w(i,:), & ! intent(in)
                               stats_zt(i) )           ! intent(inout)
-        call stat_update_var( imin_F_rt, min_F_rt(i,:), & ! intent(in)
+        call stat_update_var( stats_metadata%imin_F_rt, min_F_rt(i,:), & ! intent(in)
                               stats_zt(i) )             ! intent(inout)
-        call stat_update_var( imax_F_rt, max_F_rt(i,:), & ! intent(in)
+        call stat_update_var( stats_metadata%imax_F_rt, max_F_rt(i,:), & ! intent(in)
                               stats_zt(i) )             ! intent(inout)
-        call stat_update_var( imin_F_thl, min_F_thl(i,:), & ! intent(in)
+        call stat_update_var( stats_metadata%imin_F_thl, min_F_thl(i,:), & ! intent(in)
                               stats_zt(i) )               ! intent(inout)
-        call stat_update_var( imax_F_thl, max_F_thl(i,:), & ! intent(in)
+        call stat_update_var( stats_metadata%imax_F_thl, max_F_thl(i,:), & ! intent(in)
                               stats_zt(i) )               ! intent(inout)
       end do
     end if
@@ -3778,16 +3586,8 @@ module advance_clubb_core_module
       ! Interpolate sclrm to the momentum level for use in
       ! the second call to pdf_closure
       do j = 1, sclr_dim
-        sclrm_zm(:,:,j) = zt2zm( nz, ngrdcol, gr, sclrm(:,:,j) )
-
         ! Clip if extrap. causes sclrm_zm to be less than sclr_tol
-
-        !$acc parallel loop gang vector default(present)
-        do i = 1, ngrdcol
-          sclrm_zm(i,nz,j) = max( sclrm_zm(i,nz,j), sclr_tol(j) )
-        end do
-        !$acc end parallel loop
-
+        sclrm_zm(:,:,j) = zt2zm( nz, ngrdcol, gr, sclrm(:,:,j), sclr_tol(j) )
       end do ! i = 1, sclr_dim
 
       ! Interpolate pressure, p_in_Pa, to momentum levels.
@@ -3815,18 +3615,11 @@ module advance_clubb_core_module
       end do
       !$acc end parallel loop
 
-      rtm_zm(:,:) = zt2zm( nz, ngrdcol, gr, rtm(:,:) )
-      thlm_zm(:,:) = zt2zm( nz, ngrdcol, gr, thlm(:,:) )
-
-      !$acc parallel loop gang vector default(present)
-      do i = 1, ngrdcol
-        ! Clip if extrapolation at the top level causes rtm_zm to be < rt_tol
-        rtm_zm(i,nz) = max( rtm_zm(i,nz), rt_tol )
+      ! Clip if extrapolation at the top level causes rtm_zm to be < rt_tol
+      rtm_zm(:,:) = zt2zm( nz, ngrdcol, gr, rtm(:,:), rt_tol )
 
         ! Clip if extrapolation at the top level causes thlm_zm to be < thl_tol
-        thlm_zm(i,nz) = max( thlm_zm(i,nz), thl_tol )
-      end do
-      !$acc end parallel loop
+      thlm_zm(:,:) = zt2zm( nz, ngrdcol, gr, thlm(:,:), thl_tol )
 
       ! Interpolate hydrometeor mixed moments to momentum levels.
       do j = 1, hydromet_dim
@@ -3846,7 +3639,7 @@ module advance_clubb_core_module
       end if 
 
       ! Call pdf_closure to output the variables which belong on the momentum grid.
-      call pdf_closure( nz, ngrdcol,                               & ! intent(in)
+      call pdf_closure( nz, ngrdcol, sclr_dim, sclr_tol,           & ! intent(in)
              hydromet_dim, p_in_Pa_zm, exner_zm, thv_ds_zm,        & ! intent(in)
              wm_zm, wp2, wp3_zm,                                   & ! intent(in)
              Skw_zm, Skthl_zm, Skrt_zm, Sku_zm, Skv_zm,            & ! intent(in)
@@ -3865,7 +3658,10 @@ module advance_clubb_core_module
              wphydrometp, wp2hmp_zm,                               & ! intent(in)
              rtphmp, thlphmp,                                      & ! intent(in)
              clubb_params,                                         & ! intent(in)
+             saturation_formula,                                   & ! intent(in)
+             stats_metadata,                                       & ! intent(in)
              iiPDF_type,                                           & ! intent(in)
+             l_mix_rat_hm,                                         & ! intent(in)
              sigma_sqd_w,                                          & ! intent(inout)
              pdf_params_zm, pdf_implicit_coefs_terms_zm,           & ! intent(inout)
              wpup2_zm, wpvp2_zm,                                   & ! intent(out)
@@ -3899,15 +3695,7 @@ module advance_clubb_core_module
       
       ! Interpolate momentum variables output from the first call to
       ! pdf_closure back to momentum grid.
-      wp4(:,:) = zt2zm( nz, ngrdcol, gr, wp4_zt(:,:) )  ! Pos. def. quantity
-
-      !$acc parallel loop gang vector collapse(2) default(present)
-      do k = 1, nz
-        do i = 1, ngrdcol
-          wp4(i,k) = max( wp4(i,k), zero_threshold )  ! Pos. def. quantity
-        end do
-      end do
-      !$acc end parallel loop
+      wp4(:,:) = zt2zm( nz, ngrdcol, gr, wp4_zt(:,:), zero_threshold )  ! Pos. def. quantity
 
       !$acc parallel loop gang vector default(present)
       do i = 1, ngrdcol
@@ -3924,17 +3712,9 @@ module advance_clubb_core_module
 
 #ifndef CLUBB_CAM
       ! CAM-CLUBB needs cloud water variance thus always compute this
-      if ( ircp2 > 0 ) then
+      if ( stats_metadata%ircp2 > 0 ) then
 #endif
-        rcp2(:,:) = zt2zm( nz, ngrdcol, gr, rcp2_zt(:,:) )  ! Pos. def. quantity
-        
-        !$acc parallel loop gang vector collapse(2) default(present)
-        do k = 1, nz
-          do i = 1, ngrdcol
-            rcp2(i,k) = max( rcp2(i,k), zero_threshold )
-          end do
-        end do
-        !$acc end parallel loop
+        rcp2(:,:) = zt2zm( nz, ngrdcol, gr, rcp2_zt(:,:), zero_threshold )  ! Pos. def. quantity
 #ifndef CLUBB_CAM
         !$acc parallel loop gang vector default(present) 
         do i = 1, ngrdcol
@@ -4003,12 +3783,12 @@ module advance_clubb_core_module
 
     end if ! l_call_pdf_closure_twice
     
-    if ( l_stats_samp .and. l_samp_stats_in_pdf_call ) then
+    if ( stats_metadata%l_stats_samp .and. l_samp_stats_in_pdf_call ) then
       !$acc update host( uprcp, vprcp )
       do i = 1, ngrdcol
-        call stat_update_var( iuprcp,  uprcp(i,:),  & ! intent(in)
+        call stat_update_var( stats_metadata%iuprcp,  uprcp(i,:),  & ! intent(in)
                               stats_zm(i) )           ! intent(inout)
-        call stat_update_var( ivprcp,  vprcp(i,:),  & ! intent(in)
+        call stat_update_var( stats_metadata%ivprcp,  vprcp(i,:),  & ! intent(in)
                               stats_zm(i) )           ! intent(inout)
       end do
     end if
@@ -4017,7 +3797,9 @@ module advance_clubb_core_module
     ! thermodynamic-level variables output from pdf_closure.
     ! ldgrant June 2009
     if ( l_trapezoidal_rule_zt ) then
-      call trapezoidal_rule_zt( nz, ngrdcol, gr, l_call_pdf_closure_twice,   & ! intent(in)
+      call trapezoidal_rule_zt( nz, ngrdcol, sclr_dim, gr,                   & ! intent(in)
+                                l_call_pdf_closure_twice,                    & ! intent(in)
+                                stats_metadata,                              & ! intent(in)
                                 wprtp2, wpthlp2,                             & ! intent(inout)
                                 wprtpthlp, cloud_frac, ice_supersat_frac,    & ! intent(inout)
                                 rcm, wp2thvp, wpsclrprtp, wpsclrp2,          & ! intent(inout)
@@ -4026,6 +3808,15 @@ module advance_clubb_core_module
                                 wprtpthlp_zm, cloud_frac_zm,                 & ! intent(inout)
                                 ice_supersat_frac_zm, rcm_zm, wp2thvp_zm,    & ! intent(inout)
                                 wpsclrprtp_zm, wpsclrp2_zm, wpsclrpthlp_zm )   ! intent(inout)
+    else ! l_trapezoidal_rule_zt
+      cloud_frac_zm = zt2zm( nz, ngrdcol, gr, cloud_frac )
+      ! Since top momentum level is higher than top thermo. level,
+      ! set variables at top momentum level to 0.
+      !$acc parallel loop gang vector default(present)
+      do i = 1, ngrdcol
+        cloud_frac_zm(i,nz)  = 0.0_core_rknd
+      end do
+      !$acc end parallel loop
     end if ! l_trapezoidal_rule_zt
 
     ! If l_trapezoidal_rule_zm is true, call trapezoidal_rule_zm for
@@ -4079,7 +3870,7 @@ module advance_clubb_core_module
     !$acc end parallel loop
 
     T_in_K = thlm2T_in_K( nz, ngrdcol, thlm, exner, rcm )
-    rsat = sat_mixrat_liq( nz, ngrdcol, p_in_Pa, T_in_K )
+    rsat = sat_mixrat_liq( nz, ngrdcol, p_in_Pa, T_in_K, saturation_formula )
 
     !$acc parallel loop gang vector collapse(2) default(present)
     do k = 1, nz
@@ -4098,7 +3889,7 @@ module advance_clubb_core_module
       l_spur_supersat = .false.
       
 
-      !$acc parallel loop gang vector collapse(2) default(present)
+      !$acc parallel loop gang vector collapse(2) default(present) reduction(.or.:l_spur_supersat)
       do k = 2, nz
         do i = 1, ngrdcol
           if (rel_humidity(i,k) > 1.0_core_rknd) then
@@ -4145,22 +3936,11 @@ module advance_clubb_core_module
   end subroutine pdf_closure_driver
 
   !=============================================================================
-    subroutine setup_clubb_core &
-               ( nzmax, T0_in, ts_nudge_in,               & ! intent(in)
-                 hydromet_dim_in, sclr_dim_in,            & ! intent(in)
-                 sclr_tol_in, edsclr_dim_in, params,      & ! intent(in)
-                 l_host_applies_sfc_fluxes,               & ! intent(in)
-                 saturation_formula,                      & ! intent(in)
-                 l_input_fields,                          & ! intent(in)
-#ifdef GFDL
-                 I_sat_sphum,                             & ! intent(in)  h1g, 2010-06-16
-#endif
-                 clubb_config_flags,                      & ! intent(in)
-
-#ifdef GFDL
-                 cloud_frac_min,                          & ! intent(in)  h1g, 2010-06-16
-#endif
-                 err_code_out )                             ! intent(out)
+  subroutine check_clubb_settings( nzmax, params,       & ! intent(in)
+                                   l_implemented,       & ! intent(in)
+                                   l_input_fields,      & ! intent(in)
+                                   clubb_config_flags,  & ! intent(in)
+                                   err_code_out )         ! intent(out)
 
       ! Description:
       !   Subroutine to set up the model for execution.
@@ -4170,7 +3950,6 @@ module advance_clubb_core_module
       !---------------------------------------------------------------------
 
       use grid_class, only: &
-          setup_grid, & ! Procedure
           grid ! Type
 
       use parameter_indices, only:  &
@@ -4191,9 +3970,6 @@ module advance_clubb_core_module
           setup_parameters,    & ! Procedure
           nu_vertical_res_dep    ! Type(s)
 
-      use parameters_model, only: &
-          setup_parameters_model ! Procedure
-
       use constants_clubb, only:  &
           fstderr, &  ! Variable(s)
           one, &
@@ -4208,7 +3984,6 @@ module advance_clubb_core_module
 
       use model_flags, only: &
           clubb_config_flags_type, & ! Type
-          setup_model_flags, & ! Subroutine
           iiPDF_ADG1,       & ! Variable(s)
           iiPDF_ADG2,       &
           iiPDF_3D_Luhar,   &
@@ -4222,9 +3997,18 @@ module advance_clubb_core_module
       use clubb_precision, only: &
           core_rknd ! Variable(s)
 
+      use sponge_layer_damping, only: &
+          thlm_sponge_damp_settings,    & ! Variable(s)
+          rtm_sponge_damp_settings,     &
+          uv_sponge_damp_settings,      &
+          wp2_sponge_damp_settings,     &
+          wp3_sponge_damp_settings,     &
+          up2_vp2_sponge_damp_settings
+
+
       implicit none
 
-      ! Input Variables
+      !---------------------- Input Variables ----------------------
 
       ! Grid definition
       integer, intent(in) :: nzmax  ! Vertical grid levels            [#]
@@ -4233,52 +4017,27 @@ module advance_clubb_core_module
       !                      given zm_init and zm_top when
       !                      running in standalone mode.
 
-      ! Model parameters
-      real( kind = core_rknd ), intent(in) ::  &
-        T0_in, ts_nudge_in
-
-      integer, intent(in) :: &
-        hydromet_dim_in,  & ! Number of hydrometeor species
-        sclr_dim_in,      & ! Number of passive scalars
-        edsclr_dim_in       ! Number of eddy-diff. passive scalars
-
-      real( kind = core_rknd ), intent(in), dimension(sclr_dim_in) :: &
-        sclr_tol_in    ! Thresholds for passive scalars
-
       real( kind = core_rknd ), intent(in), dimension(nparams) :: &
         params  ! Including C1, nu1, nu2, etc.
 
       ! Flags
       logical, intent(in) ::  &
-        l_host_applies_sfc_fluxes ! Whether to apply for the surface flux
-
-      character(len=*), intent(in) :: &
-        saturation_formula ! Approximation for saturation vapor pressure
-
-      logical, intent(in) ::  &
-        l_input_fields    ! Flag for whether LES input fields are being used
+        l_implemented, & ! Flag for whether CLUBB is being run in a host model
+        l_input_fields   ! Flag for whether LES input fields are being used
 
       type(clubb_config_flags_type), intent(in) :: &
         clubb_config_flags
-        
 
-#ifdef GFDL
-      logical, intent(in) :: &  ! h1g, 2010-06-16 begin mod
-         I_sat_sphum
-
-      real( kind = core_rknd ), intent(in) :: &
-         cloud_frac_min         ! h1g, 2010-06-16 end mod
-#endif
-
+      !---------------------- Output Variables ----------------------
       integer, intent(out) :: &
         err_code_out  ! Error code indicator
 
-      !----- Begin Code -----
+      !---------------------- Begin Code ----------------------
 
       err_code_out = clubb_no_error ! Initialize to no error value
       call initialize_error_headers
 
-#ifdef _OPENACC
+#ifdef CLUBB_GPU
       if ( clubb_config_flags%penta_solve_method == lapack ) then
         write(fstderr,*) "WARNING: The penta-diagonal lapack solver is not GPU accelerated"
         write(fstderr,*) " Set penta_solve_method = 2, to use an accelerated penta-diagonal solver"
@@ -4301,8 +4060,7 @@ module advance_clubb_core_module
           write(fstderr,*) "C1 = ", params(iC1)
           write(fstderr,*) "C14 = ", params(iC14)
           write(fstderr,*) "l_stability_correct_tau_zm = ", clubb_config_flags%l_stability_correct_tau_zm
-          write(fstderr,*) "Fatal error in setup_clubb_core"
-          err_code = clubb_fatal_error
+          write(fstderr,*) "Fatal error in check_clubb_settings"
           err_code_out = clubb_fatal_error
           return
         end if
@@ -4310,26 +4068,25 @@ module advance_clubb_core_module
       end if
 
       ! Sanity check for the saturation formula
-      select case ( trim( saturation_formula ) )
-      case ( "bolton", "Bolton" )
+      select case ( clubb_config_flags%saturation_formula )
+      case ( saturation_bolton )
         ! Using the Bolton 1980 approximations for SVP over vapor/ice
 
-      case ( "flatau", "Flatau" )
+      case ( saturation_gfdl )
         ! Using the Flatau, et al. polynomial approximation for SVP over vapor/ice
 
-      case ( "gfdl", "GFDL" )   ! h1g, 2010-06-16
+      case ( saturation_flatau )   ! h1g, 2010-06-16
         ! Using the GFDL SVP formula (Goff-Gratch)
 
         ! Add new saturation formulas after this
 
-      case ( "lookup" )
+      case ( saturation_lookup )
         ! Using the lookup table
 
       case default
-        write(fstderr,*) "Unknown approx. of saturation vapor pressure: "// &
-          trim( saturation_formula )
-        write(fstderr,*) "Fatal error in setup_clubb_core"
-        err_code = clubb_fatal_error
+        write(fstderr,*) "Unknown approx. of saturation vapor pressure: ", &
+           clubb_config_flags%saturation_formula
+        write(fstderr,*) "Fatal error in check_clubb_settings"
         err_code_out = clubb_fatal_error
         return
       end select
@@ -4340,8 +4097,7 @@ module advance_clubb_core_module
            .or. clubb_config_flags%iiPDF_type > iiPDF_new_hybrid ) then
          write(fstderr,*) "Unknown type of double Gaussian PDF selected: ", clubb_config_flags%iiPDF_type
          write(fstderr,*) "iiPDF_type = ", clubb_config_flags%iiPDF_type
-         write(fstderr,*) "Fatal error in setup_clubb_core"
-         err_code = clubb_fatal_error
+         write(fstderr,*) "Fatal error in check_clubb_settings"
          err_code_out = clubb_fatal_error
          return
       endif ! iiPDF_type < iiPDF_ADG1 or iiPDF_type > iiPDF_lY93
@@ -4353,8 +4109,7 @@ module advance_clubb_core_module
                              // " input fields (l_input_fields = .true.)."
             write(fstderr,*) "iiPDF_type = ", clubb_config_flags%iiPDF_type
             write(fstderr,*) "l_input_fields = ", l_input_fields
-            write(fstderr,*) "Fatal error in setup_clubb_core"
-            err_code = clubb_fatal_error
+            write(fstderr,*) "Fatal error in check_clubb_settings"
             err_code_out = clubb_fatal_error
             return
          endif ! .not. l_input_fields
@@ -4366,8 +4121,7 @@ module advance_clubb_core_module
                              // " input fields (l_input_fields = .true.)."
             write(fstderr,*) "iiPDF_type = ", clubb_config_flags%iiPDF_type
             write(fstderr,*) "l_input_fields = ", l_input_fields
-            write(fstderr,*) "Fatal error in setup_clubb_core"
-            err_code = clubb_fatal_error
+            write(fstderr,*) "Fatal error in check_clubb_settings"
             err_code_out = clubb_fatal_error
             return
          endif ! .not. l_input_fields
@@ -4381,8 +4135,7 @@ module advance_clubb_core_module
                              // " input fields (l_input_fields = .true.)."
             write(fstderr,*) "iiPDF_type = ", clubb_config_flags%iiPDF_type
             write(fstderr,*) "l_input_fields = ", l_input_fields
-            write(fstderr,*) "Fatal error in setup_clubb_core"
-            err_code = clubb_fatal_error
+            write(fstderr,*) "Fatal error in check_clubb_settings"
             err_code_out = clubb_fatal_error
             return
          endif ! .not. l_input_fields
@@ -4396,8 +4149,7 @@ module advance_clubb_core_module
                              // " input fields (l_input_fields = .true.)."
             write(fstderr,*) "iiPDF_type = ", clubb_config_flags%iiPDF_type
             write(fstderr,*) "l_input_fields = ", l_input_fields
-            write(fstderr,*) "Fatal error in setup_clubb_core"
-            err_code = clubb_fatal_error
+            write(fstderr,*) "Fatal error in check_clubb_settings"
             err_code_out = clubb_fatal_error
             return
          endif ! .not. l_input_fields
@@ -4410,8 +4162,7 @@ module advance_clubb_core_module
                              // " input fields (l_input_fields = .true.)."
             write(fstderr,*) "iiPDF_type = ", clubb_config_flags%iiPDF_type
             write(fstderr,*) "l_input_fields = ", l_input_fields
-            write(fstderr,*) "Fatal error in setup_clubb_core"
-            err_code = clubb_fatal_error
+            write(fstderr,*) "Fatal error in check_clubb_settings"
             err_code_out = clubb_fatal_error
             return
          endif ! .not. l_input_fields
@@ -4422,8 +4173,7 @@ module advance_clubb_core_module
            .or. clubb_config_flags%ipdf_call_placement > ipdf_pre_post_advance_fields ) then
          write(fstderr,*) "Invalid option selected for ipdf_call_placement: ", &
                           clubb_config_flags%ipdf_call_placement
-         write(fstderr,*) "Fatal error in setup_clubb_core"
-         err_code = clubb_fatal_error
+         write(fstderr,*) "Fatal error in check_clubb_settings"
          err_code_out = clubb_fatal_error
          return
       endif
@@ -4441,8 +4191,7 @@ module advance_clubb_core_module
             write(fstderr,*) "The l_explicit_turbulent_adv_wpxp option" &
                              // " is not currently set up for use with the" &
                              // " l_predict_upwp_vpwp code."
-            write(fstderr,*) "Fatal error in setup_clubb_core"
-            err_code = clubb_fatal_error
+            write(fstderr,*) "Fatal error in check_clubb_settings"
             err_code_out = clubb_fatal_error
             return
          endif ! l_explicit_turbulent_adv_wpxp
@@ -4456,8 +4205,7 @@ module advance_clubb_core_module
             write(fstderr,*) "Currently, only the ADG1 PDF and the new hybrid" &
                              // " PDF are set up for use with the" &
                              // " l_predict_upwp_vpwp code."
-            write(fstderr,*) "Fatal error in setup_clubb_core"
-            err_code = clubb_fatal_error
+            write(fstderr,*) "Fatal error in check_clubb_settings"
             err_code_out = clubb_fatal_error
             return
          endif ! iiPDF_type /= iiPDF_ADG1
@@ -4471,8 +4219,7 @@ module advance_clubb_core_module
          write(fstderr,*) "Invalid configuration: l_min_xp2_from_corr_wx = T " &
                           // "and l_enable_relaxed_clipping = T"
          write(fstderr,*) "They must have opposite values"
-         write(fstderr,*) "Fatal error in setup_clubb_core"
-         err_code = clubb_fatal_error
+         write(fstderr,*) "Fatal error in check_clubb_settings"
          err_code_out = clubb_fatal_error
          return
       elseif ( ( .not. clubb_config_flags%l_min_xp2_from_corr_wx ) &
@@ -4480,8 +4227,7 @@ module advance_clubb_core_module
          write(fstderr,*) "Invalid configuration: l_min_xp2_from_corr_wx = F " &
                           // "and l_enable_relaxed_clipping = F"
          write(fstderr,*) "They must have opposite values"
-         write(fstderr,*) "Fatal error in setup_clubb_core"
-         !err_code = clubb_fatal_error
+         write(fstderr,*) "Fatal error in check_clubb_settings"
          !err_code_out = clubb_fatal_error
          !return
       endif
@@ -4491,8 +4237,7 @@ module advance_clubb_core_module
          write(fstderr,*) "The variable order_xm_wpxp must have a value " &
                           // "between 1 and 4"
          write(fstderr,*) "order_xm_wpxp = ", order_xm_wpxp
-         write(fstderr,*) "Fatal error in setup_clubb_core"
-         err_code = clubb_fatal_error
+         write(fstderr,*) "Fatal error in check_clubb_settings"
          err_code_out = clubb_fatal_error
          return
       elseif ( order_xm_wpxp == order_wp2_wp3 &
@@ -4505,8 +4250,7 @@ module advance_clubb_core_module
          write(fstderr,*) "order_wp2_wp3 = ", order_wp2_wp3
          write(fstderr,*) "order_xp2_xpyp = ", order_xp2_xpyp
          write(fstderr,*) "order_windm = ", order_windm
-         write(fstderr,*) "Fatal error in setup_clubb_core"
-         err_code = clubb_fatal_error
+         write(fstderr,*) "Fatal error in check_clubb_settings"
          err_code_out = clubb_fatal_error
          return
       endif
@@ -4515,8 +4259,7 @@ module advance_clubb_core_module
          write(fstderr,*) "The variable order_wp2_wp3 must have a value " &
                           // "between 1 and 4"
          write(fstderr,*) "order_wp2_wp3 = ", order_wp2_wp3
-         write(fstderr,*) "Fatal error in setup_clubb_core"
-         err_code = clubb_fatal_error
+         write(fstderr,*) "Fatal error in check_clubb_settings"
          err_code_out = clubb_fatal_error
          return
       elseif ( order_wp2_wp3 == order_xm_wpxp &
@@ -4529,8 +4272,7 @@ module advance_clubb_core_module
          write(fstderr,*) "order_xm_wpxp = ", order_xm_wpxp
          write(fstderr,*) "order_xp2_xpyp = ", order_xp2_xpyp
          write(fstderr,*) "order_windm = ", order_windm
-         write(fstderr,*) "Fatal error in setup_clubb_core"
-         err_code = clubb_fatal_error
+         write(fstderr,*) "Fatal error in check_clubb_settings"
          err_code_out = clubb_fatal_error
          return
       endif
@@ -4539,8 +4281,7 @@ module advance_clubb_core_module
          write(fstderr,*) "The variable order_xp2_xpyp must have a value " &
                           // "between 1 and 4"
          write(fstderr,*) "order_xp2_xpyp = ", order_xp2_xpyp
-         write(fstderr,*) "Fatal error in setup_clubb_core"
-         err_code = clubb_fatal_error
+         write(fstderr,*) "Fatal error in check_clubb_settings"
          err_code_out = clubb_fatal_error
          return
       elseif ( order_xp2_xpyp == order_wp2_wp3 &
@@ -4553,8 +4294,7 @@ module advance_clubb_core_module
          write(fstderr,*) "order_wp2_wp3 = ", order_wp2_wp3
          write(fstderr,*) "order_xm_wpxp = ", order_xm_wpxp
          write(fstderr,*) "order_windm = ", order_windm
-         write(fstderr,*) "Fatal error in setup_clubb_core"
-         err_code = clubb_fatal_error
+         write(fstderr,*) "Fatal error in check_clubb_settings"
          err_code_out = clubb_fatal_error
          return
       endif
@@ -4563,8 +4303,7 @@ module advance_clubb_core_module
          write(fstderr,*) "The variable order_windm must have a value " &
                           // "between 1 and 4"
          write(fstderr,*) "order_windm = ", order_windm
-         write(fstderr,*) "Fatal error in setup_clubb_core"
-         err_code = clubb_fatal_error
+         write(fstderr,*) "Fatal error in check_clubb_settings"
          err_code_out = clubb_fatal_error
          return
       elseif ( order_windm == order_wp2_wp3 &
@@ -4577,8 +4316,7 @@ module advance_clubb_core_module
          write(fstderr,*) "order_wp2_wp3 = ", order_wp2_wp3
          write(fstderr,*) "order_xp2_xpyp = ", order_xp2_xpyp
          write(fstderr,*) "order_xm_wpxp = ", order_xm_wpxp
-         write(fstderr,*) "Fatal error in setup_clubb_core"
-         err_code = clubb_fatal_error
+         write(fstderr,*) "Fatal error in check_clubb_settings"
          err_code_out = clubb_fatal_error
          return
       endif
@@ -4597,9 +4335,8 @@ module advance_clubb_core_module
             write(fstderr,*) "When the l_diag_Lscale_from_tau flag is " &
                              // "enabled, C1 must have a value of 1."
             write(fstderr,*) "C1 = ", params(iC1)
-            write(fstderr,*) "Warning in setup_clubb_core"
-            !write(fstderr,*) "Fatal error in setup_clubb_core"
-            !err_code = clubb_fatal_error
+            write(fstderr,*) "Warning in check_clubb_settings"
+            !write(fstderr,*) "Fatal error in check_clubb_settings"
             !err_code_out = clubb_fatal_error
          endif ! C1 check
 
@@ -4608,9 +4345,8 @@ module advance_clubb_core_module
             write(fstderr,*) "When the l_diag_Lscale_from_tau flag is " &
                              // "enabled, C1b must have a value of 1."
             write(fstderr,*) "C1b = ", params(iC1b)
-            write(fstderr,*) "Warning in setup_clubb_core"
-            !write(fstderr,*) "Fatal error in setup_clubb_core"
-            !err_code = clubb_fatal_error
+            write(fstderr,*) "Warning in check_clubb_settings"
+            !write(fstderr,*) "Fatal error in check_clubb_settings"
             !err_code_out = clubb_fatal_error
          endif ! C1b check
 
@@ -4619,9 +4355,8 @@ module advance_clubb_core_module
             write(fstderr,*) "When the l_diag_Lscale_from_tau flag is " &
                              // "enabled, C2rt must have a value of 1."
             write(fstderr,*) "C2rt = ", params(iC2rt)
-            write(fstderr,*) "Warning in setup_clubb_core"
-            !write(fstderr,*) "Fatal error in setup_clubb_core"
-            !err_code = clubb_fatal_error
+            write(fstderr,*) "Warning in check_clubb_settings"
+            !write(fstderr,*) "Fatal error in check_clubb_settings"
             !err_code_out = clubb_fatal_error
          endif ! C2rt check
 
@@ -4630,9 +4365,8 @@ module advance_clubb_core_module
             write(fstderr,*) "When the l_diag_Lscale_from_tau flag is " &
                              // "enabled, C2thl must have a value of 1."
             write(fstderr,*) "C2thl = ", params(iC2thl)
-            write(fstderr,*) "Warning in setup_clubb_core"
-            !write(fstderr,*) "Fatal error in setup_clubb_core"
-            !err_code = clubb_fatal_error
+            write(fstderr,*) "Warning in check_clubb_settings"
+            !write(fstderr,*) "Fatal error in check_clubb_settings"
             !err_code_out = clubb_fatal_error
          endif ! C2thl check
 
@@ -4641,9 +4375,8 @@ module advance_clubb_core_module
             write(fstderr,*) "When the l_diag_Lscale_from_tau flag is " &
                              // "enabled, C2rtthl must have a value of 1."
             write(fstderr,*) "C2rtthl = ", params(iC2rtthl)
-            write(fstderr,*) "Warning in setup_clubb_core"
-            !write(fstderr,*) "Fatal error in setup_clubb_core"
-            !err_code = clubb_fatal_error
+            write(fstderr,*) "Warning in check_clubb_settings"
+            !write(fstderr,*) "Fatal error in check_clubb_settings"
             !err_code_out = clubb_fatal_error
          endif ! C2rtthl check
 
@@ -4652,9 +4385,8 @@ module advance_clubb_core_module
             write(fstderr,*) "When the l_diag_Lscale_from_tau flag is " &
                              // "enabled, C6rt must have a value of 1."
             write(fstderr,*) "C6rt = ", params(iC6rt)
-            write(fstderr,*) "Warning in setup_clubb_core"
-            !write(fstderr,*) "Fatal error in setup_clubb_core"
-            !err_code = clubb_fatal_error
+            write(fstderr,*) "Warning in check_clubb_settings"
+            !write(fstderr,*) "Fatal error in check_clubb_settings"
             !err_code_out = clubb_fatal_error
          endif ! C6rt check
 
@@ -4663,9 +4395,8 @@ module advance_clubb_core_module
             write(fstderr,*) "When the l_diag_Lscale_from_tau flag is " &
                              // "enabled, C6rtb must have a value of 1."
             write(fstderr,*) "C6rtb = ", params(iC6rtb)
-            write(fstderr,*) "Warning in setup_clubb_core"
-            !write(fstderr,*) "Fatal error in setup_clubb_core"
-            !err_code = clubb_fatal_error
+            write(fstderr,*) "Warning in check_clubb_settings"
+            !write(fstderr,*) "Fatal error in check_clubb_settings"
             !err_code_out = clubb_fatal_error
          endif ! C6rtb check
 
@@ -4674,9 +4405,8 @@ module advance_clubb_core_module
             write(fstderr,*) "When the l_diag_Lscale_from_tau flag is " &
                              // "enabled, C6thl must have a value of 1."
             write(fstderr,*) "C6thl = ", params(iC6thl)
-            write(fstderr,*) "Warning in setup_clubb_core"
-            !write(fstderr,*) "Fatal error in setup_clubb_core"
-            !err_code = clubb_fatal_error
+            write(fstderr,*) "Warning in check_clubb_settings"
+            !write(fstderr,*) "Fatal error in check_clubb_settings"
             !err_code_out = clubb_fatal_error
          endif ! C6thl check
 
@@ -4685,9 +4415,8 @@ module advance_clubb_core_module
             write(fstderr,*) "When the l_diag_Lscale_from_tau flag is " &
                              // "enabled, C6thlb must have a value of 1."
             write(fstderr,*) "C6thlb = ", params(iC6thlb)
-            write(fstderr,*) "Warning in setup_clubb_core"
-            !write(fstderr,*) "Fatal error in setup_clubb_core"
-            !err_code = clubb_fatal_error
+            write(fstderr,*) "Warning in check_clubb_settings"
+            !write(fstderr,*) "Fatal error in check_clubb_settings"
             !err_code_out = clubb_fatal_error
          endif ! C6thlb check
 
@@ -4696,42 +4425,78 @@ module advance_clubb_core_module
             write(fstderr,*) "When the l_diag_Lscale_from_tau flag is " &
                              // "enabled, C14 must have a value of 1."
             write(fstderr,*) "C14 = ", params(iC14)
-            write(fstderr,*) "Warning in setup_clubb_core"
-            !write(fstderr,*) "Fatal error in setup_clubb_core"
-            !err_code = clubb_fatal_error
+            write(fstderr,*) "Warning in check_clubb_settings"
+            !write(fstderr,*) "Fatal error in check_clubb_settings"
             !err_code_out = clubb_fatal_error
          endif ! C14 check
 
       endif ! l_diag_Lscale_from_tau
 
-      ! Setup flags
-#ifdef GFDL
-      call setup_model_flags &
-           ( l_host_applies_sfc_fluxes,      & ! intent(in)
-             saturation_formula, & ! intent(in)
-             I_sat_sphum )                     ! intent(in)  h1g, 2010-06-16
+      if ( l_implemented ) then
 
-#else
-      call setup_model_flags &
-           ( l_host_applies_sfc_fluxes,      & ! intent(in)
-             saturation_formula )  ! intent(in)
-#endif
+        if ( clubb_config_flags%l_rtm_nudge ) then
+          write(fstderr,*) "l_rtm_nudge must be set to .false. when " &
+                           // "l_implemented = .true."
+          write(fstderr,*) "Fatal error in check_clubb_settings"
+          err_code_out = clubb_fatal_error
+        end if
 
+        if ( clubb_config_flags%l_uv_nudge ) then
+          write(fstderr,*) "l_rtm_nudge must be set to .false. when " &
+                           // "l_implemented = .true."
+          write(fstderr,*) "Fatal error in check_clubb_settings"
+          err_code_out = clubb_fatal_error
+        end if
 
-      ! Define model constant parameters
-#ifdef GFDL
-      call setup_parameters_model( T0_in, ts_nudge_in, params(iSkw_max_mag), & ! intent(in)
-                                   hydromet_dim_in,                          & ! intent(in)
-                                   sclr_dim_in, sclr_tol_in, edsclr_dim_in,  & ! intent(in)
-                                   cloud_frac_min )                 ! intent(in)  h1g, 2010-06-16
-#else
-      call setup_parameters_model( T0_in, ts_nudge_in, params(iSkw_max_mag), & ! intent(in)
-                                   hydromet_dim_in,                          & ! intent(in)
-                                   sclr_dim_in, sclr_tol_in, edsclr_dim_in )   ! intent(in)
-#endif
+        if ( thlm_sponge_damp_settings%l_sponge_damping ) then
+          write(fstderr,*) "thlm_sponge_damp_settings%l_sponge_damping " &
+                           // "must be set to .false. when  l_implemented = .true."
+          write(fstderr,*) "Fatal error in check_clubb_settings"
+          err_code_out = clubb_fatal_error
+        end if
+
+        if ( rtm_sponge_damp_settings%l_sponge_damping ) then
+          write(fstderr,*) "rtm_sponge_damp_settings%l_sponge_damping " &
+                           // "must be set to .false. when  l_implemented = .true."
+          write(fstderr,*) "Fatal error in check_clubb_settings"
+          err_code_out = clubb_fatal_error
+        end if
+
+        if ( uv_sponge_damp_settings%l_sponge_damping ) then
+          write(fstderr,*) "uv_sponge_damp_settings%l_sponge_damping " &
+                           // "must be set to .false. when  l_implemented = .true."
+          write(fstderr,*) "Fatal error in check_clubb_settings"
+          err_code_out = clubb_fatal_error
+        end if
+
+        if ( wp2_sponge_damp_settings%l_sponge_damping ) then
+          write(fstderr,*) "wp2_sponge_damp_settings%l_sponge_damping " &
+                           // "must be set to .false. when  l_implemented = .true."
+          write(fstderr,*) "Fatal error in check_clubb_settings"
+          err_code_out = clubb_fatal_error
+        end if
+
+        if ( wp3_sponge_damp_settings%l_sponge_damping ) then
+          write(fstderr,*) "wp3_sponge_damp_settings%l_sponge_damping " &
+                           // "must be set to .false. when  l_implemented = .true."
+          write(fstderr,*) "Fatal error in check_clubb_settings"
+          err_code_out = clubb_fatal_error
+        end if
+
+        if ( up2_vp2_sponge_damp_settings%l_sponge_damping ) then
+          write(fstderr,*) "up2_vp2_sponge_damp_settings%l_sponge_damping " &
+                           // "must be set to .false. when  l_implemented = .true."
+          write(fstderr,*) "Fatal error in check_clubb_settings"
+          err_code_out = clubb_fatal_error
+        end if
+
+      end if
+
+      err_code = err_code_out
 
       return
-    end subroutine setup_clubb_core
+
+    end subroutine check_clubb_settings
 
     !----------------------------------------------------------------------------
     subroutine cleanup_clubb_core( gr )
@@ -4742,7 +4507,6 @@ module advance_clubb_core_module
       ! References:
       !   None
       !---------------------------------------------------------------------------
-      use parameters_model, only: sclr_tol ! Variable
 
       use grid_class, only: &
         cleanup_grid, & ! Procedure
@@ -4754,9 +4518,6 @@ module advance_clubb_core_module
 
       !----- Begin Code -----
 
-      ! De-allocate the array for the passive scalar tolerances
-      deallocate( sclr_tol )
-
       ! De-allocate the arrays for the grid
       call cleanup_grid( gr ) ! intent(in)
 
@@ -4764,7 +4525,9 @@ module advance_clubb_core_module
     end subroutine cleanup_clubb_core
 
     !-----------------------------------------------------------------------
-    subroutine trapezoidal_rule_zt( nz, ngrdcol, gr, l_call_pdf_closure_twice,   & ! intent(in)
+    subroutine trapezoidal_rule_zt( nz, ngrdcol, sclr_dim, gr,                   & ! intent(in)
+                                    l_call_pdf_closure_twice,                    & ! intent(in)
+                                    stats_metadata,                              & ! intent(in)
                                     wprtp2, wpthlp2,                             & ! intent(inout)
                                     wprtpthlp, cloud_frac, ice_supersat_frac,    & ! intent(inout)
                                     rcm, wp2thvp, wpsclrprtp, wpsclrp2,          & ! intent(inout)
@@ -4796,22 +4559,9 @@ module advance_clubb_core_module
       !   None
       !-----------------------------------------------------------------------
 
-      use stats_variables, only: &
-          iwprtp2, & ! Varibles
-          iwprtpthlp, &
-          iwpthlp2, &
-          iwprtp2, &
-          iwpsclrp2, &
-          iwpsclrprtp, &
-          iwpsclrpthlp, &
-          l_stats
-
       use grid_class, only: &
-        grid, & ! Type
+          grid, & ! Type
           zt2zm ! Procedure
-
-      use parameters_model, only: &
-          sclr_dim ! Number of passive scalar variables
 
       use pdf_parameter_module, only: &
           pdf_parameter ! Derived data type
@@ -4819,18 +4569,27 @@ module advance_clubb_core_module
       use clubb_precision, only: &
           core_rknd ! Variable(s)
 
+      use stats_variables, only: &
+          stats_metadata_type
+
       implicit none
 
-      ! Input variables
+      !------------------------ Input variables ------------------------
       integer, intent(in) :: &
         nz, &
-        ngrdcol
+        ngrdcol, &
+        sclr_dim
 
-      type (grid), target, intent(in) :: gr
-    
-      logical, intent(in) :: l_call_pdf_closure_twice
+      type (grid), target, intent(in) :: &
+        gr
 
-      ! Input/Output variables
+      logical, intent(in) :: &
+        l_call_pdf_closure_twice
+
+      type (stats_metadata_type), intent(in) :: &
+        stats_metadata
+
+      !------------------------ Input/Output variables ------------------------
       ! Thermodynamic level variables output from the first call to pdf_closure
       real( kind = core_rknd ), dimension(ngrdcol,nz), intent(inout) :: &
         wprtp2,             & ! w'rt'^2                   [m kg^2/kg^2]
@@ -4863,7 +4622,7 @@ module advance_clubb_core_module
         wpsclrp2_zm,    & ! w'sclr'^2 on momentum grid
         wpsclrpthlp_zm    ! w'sclr'thl' on momentum grid
 
-      ! Local variables
+      !------------------------ Local variables ------------------------
 
       integer :: i, k, sclr
 
@@ -4923,36 +4682,36 @@ module advance_clubb_core_module
 
       end if ! .not. l_call_pdf_closure_twice
 
-      if ( l_stats ) then
+      if ( stats_metadata%l_stats ) then
         ! Use the trapezoidal rule to recompute the variables on the stats_zt level
-        if ( iwprtp2 > 0 ) then
+        if ( stats_metadata%iwprtp2 > 0 ) then
           call calc_trapezoid_zt( nz, ngrdcol, gr, &
                                   wprtp2, wprtp2_zm, &
                                   wprtp2 )
         end if
-        if ( iwpthlp2 > 0 ) then
+        if ( stats_metadata%iwpthlp2 > 0 ) then
           call calc_trapezoid_zt( nz, ngrdcol, gr, &
                                   wpthlp2, wpthlp2_zm, &
                                   wpthlp2 )
         end if
-        if ( iwprtpthlp > 0 ) then
+        if ( stats_metadata%iwprtpthlp > 0 ) then
           call calc_trapezoid_zt( nz, ngrdcol, gr, &
                                   wprtpthlp, wprtpthlp_zm, &
                                   wprtpthlp )
         end if
 
         do sclr = 1, sclr_dim
-          if ( iwpsclrprtp(sclr) > 0 ) then
+          if ( stats_metadata%iwpsclrprtp(sclr) > 0 ) then
             call calc_trapezoid_zt( nz, ngrdcol, gr, &
                                     wpsclrprtp(:,:,sclr), wpsclrprtp_zm(:,:,sclr), &
                                     wpsclrprtp(:,:,sclr) )
           end if
-          if ( iwpsclrpthlp(sclr) > 0 ) then
+          if ( stats_metadata%iwpsclrpthlp(sclr) > 0 ) then
             call calc_trapezoid_zt( nz, ngrdcol, gr, &
                                     wpsclrpthlp(:,:,sclr), wpsclrpthlp_zm(:,:,sclr), &
                                     wpsclrpthlp(:,:,sclr) )
           end if
-          if ( iwpsclrp2(sclr) > 0 ) then
+          if ( stats_metadata%iwpsclrp2(sclr) > 0 ) then
             call calc_trapezoid_zt( nz, ngrdcol,  gr, &
                                     wpsclrp2(:,:,sclr), wpsclrp2_zm(:,:,sclr), &
                                     wpsclrp2(:,:,sclr) )
@@ -5254,7 +5013,7 @@ module advance_clubb_core_module
       end do
       !$acc end parallel loop
 
-      !$acc parallel loop gang vector collapse(2) default(present)
+      !$acc parallel loop gang vector collapse(2) default(present) reduction(.or.:err_code)
       do k = 2, nz-1
         do i = 1, ngrdcol
 

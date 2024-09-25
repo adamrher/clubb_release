@@ -39,6 +39,7 @@ module mono_flux_limiter
                                              tridiag_solve_method, &
                                              l_upwind_xm_ma, &
                                              l_mono_flux_lim_spikefix, &
+                                             stats_metadata, &
                                              stats_zt, stats_zm, &
                                              xm, wpxp )
 
@@ -313,36 +314,8 @@ module mono_flux_limiter
         stat_end_update,  &
         stat_update_var
 
-    use stats_variables, only:  &
-        iwprtp_mfl, &
-        irtm_mfl, &
-        iwpthlp_mfl, &
-        ithlm_mfl, &
-        iupwp_mfl, &
-        ium_mfl, &
-        ivpwp_mfl, &
-        ivm_mfl, &
-        ithlm_old, &
-        ithlm_without_ta, &
-        ithlm_mfl_min, &
-        ithlm_mfl_max, &
-        irtm_old, &
-        irtm_without_ta, &
-        irtm_mfl_min, &
-        irtm_mfl_max, &
-        ithlm_enter_mfl, &
-        ithlm_exit_mfl, &
-        irtm_enter_mfl, &
-        irtm_exit_mfl, &
-        iwpthlp_mfl_min, &
-        iwpthlp_mfl_max, &
-        iwpthlp_enter_mfl, &
-        iwpthlp_exit_mfl, &
-        iwprtp_mfl_min, &
-        iwprtp_mfl_max, &
-        iwprtp_enter_mfl, &
-        iwprtp_exit_mfl, &
-        l_stats_samp
+    use stats_variables, only: &
+        stats_metadata_type
 
     use stats_type, only: stats ! Type
 
@@ -354,7 +327,7 @@ module mono_flux_limiter
     ! when xm(t+1) needs to be changed.
     logical, parameter :: l_mfl_xm_imp_adj = .true.
 
-    ! Input Variables
+    !----------------------- Input Variables -----------------------
     integer, intent(in) :: &
       nz, &
       ngrdcol
@@ -398,7 +371,10 @@ module mono_flux_limiter
       l_mono_flux_lim_spikefix ! Flag to implement monotonic flux limiter code that
                                ! eliminates spurious drying tendencies at model top 
 
-    ! Input/Output Variables
+    type (stats_metadata_type), intent(in) :: &
+      stats_metadata
+
+    !----------------------- Input/Output Variables -----------------------
     type (stats), target, dimension(ngrdcol), intent(inout) :: &
       stats_zt, &
       stats_zm
@@ -407,7 +383,7 @@ module mono_flux_limiter
       xm,  &      ! xm at current time step (thermodynamic levels)  [units vary]
       wpxp        ! w'x' (momentum levels)                          [units vary]
 
-    ! Local Variables
+    !----------------------- Local Variables -----------------------
     real( kind = core_rknd ), dimension(ngrdcol,nz) :: &
       xp2_zt,          &      ! x'^2 interpolated to thermodynamic levels  [units vary]
       xm_enter_mfl,    &      ! xm as it enters the MFL                    [units vary]
@@ -462,6 +438,13 @@ module mono_flux_limiter
     real( kind = core_rknd ), dimension(ngrdcol,nz) ::  &
       xm_mfl
 
+    real( kind = core_rknd ) :: &
+      max_tmp, &
+      min_tmp
+
+    real( kind = core_rknd ), dimension(nz) ::  &
+      tmp_in
+
     !---------------------------- Begin Code ----------------------------
 
     !$acc enter data create( xp2_zt, xm_enter_mfl, xm_without_ta, wpxp_net_adjust, &
@@ -471,20 +454,20 @@ module mono_flux_limiter
 
     select case( solve_type )
     case ( mono_flux_rtm )  ! rtm/wprtp
-       iwpxp_mfl = iwprtp_mfl
-       ixm_mfl   = irtm_mfl
+       iwpxp_mfl = stats_metadata%iwprtp_mfl
+       ixm_mfl   = stats_metadata%irtm_mfl
        max_xp2   = 5.0e-6_core_rknd
     case ( mono_flux_thlm ) ! thlm/wpthlp
-       iwpxp_mfl = iwpthlp_mfl
-       ixm_mfl   = ithlm_mfl
+       iwpxp_mfl = stats_metadata%iwpthlp_mfl
+       ixm_mfl   = stats_metadata%ithlm_mfl
        max_xp2   = 5.0_core_rknd
     case ( mono_flux_um )  ! um/upwp
-       iwpxp_mfl = iupwp_mfl
-       ixm_mfl   = ium_mfl
+       iwpxp_mfl = stats_metadata%iupwp_mfl
+       ixm_mfl   = stats_metadata%ium_mfl
        max_xp2   = 10.0_core_rknd
     case ( mono_flux_vm )  ! vm/vpwp
-       iwpxp_mfl = ivpwp_mfl
-       ixm_mfl   = ivm_mfl
+       iwpxp_mfl = stats_metadata%ivpwp_mfl
+       ixm_mfl   = stats_metadata%ivm_mfl
        max_xp2   = 10.0_core_rknd
     case default    ! passive scalars are involved
        iwpxp_mfl = 0
@@ -493,33 +476,43 @@ module mono_flux_limiter
     end select
 
 
-    if ( l_stats_samp ) then
+    if ( stats_metadata%l_stats_samp ) then
       !$acc update host( wpxp, xm )
       do i = 1, ngrdcol
         call stat_begin_update( nz, iwpxp_mfl, wpxp(i,:) / dt, & ! intent(in)
                                 stats_zm(i) ) ! intent(inout)
-        call stat_begin_update( nz, ixm_mfl, xm(i,:) / dt, & ! intent(in)
+        tmp_in(1) = 0.0_core_rknd
+        tmp_in(2:nz) = xm(i,2:nz)
+        call stat_begin_update( nz, ixm_mfl, tmp_in / dt, & ! intent(in)
                                 stats_zt(i) ) ! intent(inout)
       end do
     endif
-    if ( l_stats_samp .and. solve_type == mono_flux_thlm ) then
+    if ( stats_metadata%l_stats_samp .and. solve_type == mono_flux_thlm ) then
       !$acc update host( xm, xm_old, wpxp )
       do i = 1, ngrdcol
-        call stat_update_var( ithlm_enter_mfl, xm(i,:), & ! intent(in)
+        tmp_in(1) = 0.0_core_rknd
+        tmp_in(2:nz) = xm(i,2:nz)
+        call stat_update_var( stats_metadata%ithlm_enter_mfl, tmp_in, & ! intent(in)
                               stats_zt(i) ) ! intent(inout)
-        call stat_update_var( ithlm_old, xm_old(i,:), & ! intent(in)
+        tmp_in(1) = 0.0_core_rknd
+        tmp_in(2:nz) = xm_old(i,2:nz)
+        call stat_update_var( stats_metadata%ithlm_old, tmp_in, & ! intent(in)
                               stats_zt(i) ) ! intent(inout)
-        call stat_update_var( iwpthlp_enter_mfl, wpxp(i,:), & ! intent(in)
+        call stat_update_var( stats_metadata%iwpthlp_enter_mfl, wpxp(i,:), & ! intent(in)
                               stats_zm(i) ) ! intent(inout)
       end do
-    elseif ( l_stats_samp .and. solve_type == mono_flux_rtm ) then
+    elseif ( stats_metadata%l_stats_samp .and. solve_type == mono_flux_rtm ) then
       !$acc update host( xm, xm_old, wpxp )
       do i = 1, ngrdcol
-        call stat_update_var( irtm_enter_mfl, xm(i,:), & ! intent(in)
+        tmp_in(1) = 0.0_core_rknd
+        tmp_in(2:nz) = xm(i,2:nz)
+        call stat_update_var( stats_metadata%irtm_enter_mfl, tmp_in, & ! intent(in)
                               stats_zt(i) ) ! intent(inout)
-        call stat_update_var( irtm_old, xm_old(i,:), & ! intent(in)
+        tmp_in(1) = 0.0_core_rknd
+        tmp_in(2:nz) = xm_old(i,2:nz)
+        call stat_update_var( stats_metadata%irtm_old, tmp_in, & ! intent(in)
                               stats_zt(i) ) ! intent(inout)
-        call stat_update_var( iwprtp_enter_mfl, wpxp(i,:), & ! intent(in)
+        call stat_update_var( stats_metadata%iwprtp_enter_mfl, wpxp(i,:), & ! intent(in)
                               stats_zm(i) ) ! intent(inout)
       end do
     endif
@@ -631,44 +624,32 @@ module mono_flux_limiter
     ! The values of w'x' at level 1 and at level gr%nz are set values and
     ! are not altered.
 
-    ! Find the smallest value of all relevant level minima for variable x.
+    ! Find the smallest and largest value of all relevant levels for variable x.
     !$acc parallel loop gang vector collapse(2) default(present)
     do k = 2, nz-1
       do i = 1, ngrdcol
 
-        low_lev  = max( low_lev_effect(i,k), 2 )
+        low_lev  = max( low_lev_effect(i,k), 2)
         high_lev = min( high_lev_effect(i,k), nz )
 
-        min_x_allowable(i,k) = min_x_allowable_lev(i,low_lev)
+        min_tmp = min_x_allowable_lev(i,low_lev)
+        max_tmp = max_x_allowable_lev(i,low_lev)
 
-        do j = low_lev, high_lev
-          min_x_allowable(i,k) = min( min_x_allowable(i,k), min_x_allowable_lev(i,j) )
+        do j = low_lev+1, high_lev
+          min_tmp = min( min_tmp, min_x_allowable_lev(i,j) )
+          max_tmp = max( max_tmp, max_x_allowable_lev(i,j) )
         end do
+
+        min_x_allowable(i,k) = min_tmp
+        max_x_allowable(i,k) = max_tmp
 
       end do
     end do
     !$acc end parallel loop
 
-    ! Find the largest value of all relevant level maxima for variable x.
-    !$acc parallel loop gang vector collapse(2) default(present)
-    do k = 2, nz-1
-      do i = 1, ngrdcol
-
-        low_lev  = max( low_lev_effect(i,k), 2 )
-        high_lev = min( high_lev_effect(i,k), nz )
-
-        max_x_allowable(i,k) = max_x_allowable_lev(i,low_lev)
-
-        do j = low_lev, high_lev
-          max_x_allowable(i,k) = max( max_x_allowable(i,k), max_x_allowable_lev(i,j) )
-        end do
-      end do
-    end do
-    !$acc end parallel loop
-
-    !$acc parallel loop gang vector collapse(2) default(present)
-    do k = 2, nz-1, 1
-      do i = 1, ngrdcol
+    !$acc parallel loop gang vector default(present)
+    do i = 1, ngrdcol
+      do k = 2, nz-1
  
         ! Find the upper limit for w'x' for a monotonic turbulent flux.
         ! The following "if" statement ensures there are no "spikes" at the top of the column,
@@ -804,34 +785,46 @@ module mono_flux_limiter
     end do
     !$acc end parallel loop
 
-    if ( l_stats_samp .and. solve_type == mono_flux_thlm ) then
+    if ( stats_metadata%l_stats_samp .and. solve_type == mono_flux_thlm ) then
       !$acc update host( xm_without_ta, min_x_allowable, wpxp_mfl_min, &
       !$acc              wpxp_mfl_max, max_x_allowable )
       do i = 1, ngrdcol
-        call stat_update_var( ithlm_without_ta, xm_without_ta(i,:), & ! intent(in)
+        tmp_in(1) = 0.0_core_rknd
+        tmp_in(2:nz) = xm_without_ta(i,2:nz)
+        call stat_update_var( stats_metadata%ithlm_without_ta, tmp_in, & ! intent(in)
                               stats_zt(i) ) ! intent(inout)
-        call stat_update_var( ithlm_mfl_min, min_x_allowable(i,:), & ! intent(in)
+        tmp_in(1) = 0.0_core_rknd
+        tmp_in(2:nz) = min_x_allowable(i,2:nz)
+        call stat_update_var( stats_metadata%ithlm_mfl_min, tmp_in, & ! intent(in)
                               stats_zt(i) ) ! intent(inout)
-        call stat_update_var( ithlm_mfl_max, max_x_allowable(i,:), & ! intent(in)
+        tmp_in(1) = 0.0_core_rknd
+        tmp_in(2:nz) = max_x_allowable(i,2:nz)
+        call stat_update_var( stats_metadata%ithlm_mfl_max, tmp_in, & ! intent(in)
                               stats_zt(i) ) ! intent(inout)
-        call stat_update_var( iwpthlp_mfl_min, wpxp_mfl_min(i,:), & ! intent(in)
+        call stat_update_var( stats_metadata%iwpthlp_mfl_min, wpxp_mfl_min(i,:), & ! intent(in)
                               stats_zm(i) ) ! intent(inout)
-        call stat_update_var( iwpthlp_mfl_max, wpxp_mfl_max(i,:), & ! intent(in)
+        call stat_update_var( stats_metadata%iwpthlp_mfl_max, wpxp_mfl_max(i,:), & ! intent(in)
                               stats_zm(i) ) ! intent(inout)
       end do
-    elseif ( l_stats_samp .and. solve_type == mono_flux_rtm ) then
+    elseif ( stats_metadata%l_stats_samp .and. solve_type == mono_flux_rtm ) then
       !$acc update host( xm_without_ta, min_x_allowable, max_x_allowable,  &
       !$acc              wpxp_mfl_min, wpxp_mfl_max )
       do i = 1, ngrdcol
-        call stat_update_var( irtm_without_ta, xm_without_ta(i,:), & ! intent(in)
+        tmp_in(1) = 0.0_core_rknd
+        tmp_in(2:nz) = xm_without_ta(i,2:nz)
+        call stat_update_var( stats_metadata%irtm_without_ta, tmp_in, & ! intent(in)
                               stats_zt(i) ) ! intent(inout)
-        call stat_update_var( irtm_mfl_min, min_x_allowable(i,:), & ! intent(in)
+        tmp_in(1) = 0.0_core_rknd
+        tmp_in(2:nz) = min_x_allowable(i,2:nz)
+        call stat_update_var( stats_metadata%irtm_mfl_min, tmp_in, & ! intent(in)
                               stats_zt(i) ) ! intent(inout)
-        call stat_update_var( irtm_mfl_max, max_x_allowable(i,:), & ! intent(in)
+        tmp_in(1) = 0.0_core_rknd
+        tmp_in(2:nz) = max_x_allowable(i,2:nz)
+        call stat_update_var( stats_metadata%irtm_mfl_max, tmp_in, & ! intent(in)
                               stats_zt(i) ) ! intent(inout)
-        call stat_update_var( iwprtp_mfl_min, wpxp_mfl_min(i,:), & ! intent(in)
+        call stat_update_var( stats_metadata%iwprtp_mfl_min, wpxp_mfl_min(i,:), & ! intent(in)
                               stats_zm(i) ) ! intent(inout)
-        call stat_update_var( iwprtp_mfl_max, wpxp_mfl_max(i,:), & ! intent(in)
+        call stat_update_var( stats_metadata%iwprtp_mfl_max, wpxp_mfl_max(i,:), & ! intent(in)
                               stats_zm(i) ) ! intent(inout)
       end do
     endif
@@ -879,7 +872,7 @@ module mono_flux_limiter
         ! Solve the tridiagonal matrix equation.
         call mfl_xm_solve( nz, ngrdcol, solve_type, tridiag_solve_method,  & ! intent(in)
                            lhs_mfl_xm, rhs_mfl_xm,                         & ! intent(inout)
-                           xm_mfl )                                          ! intent(inout)
+                           xm_mfl )                                          ! intent(out)
 
         ! If an adjustment is for a column
         !$acc parallel loop gang vector collapse(2) default(present)
@@ -956,10 +949,11 @@ module mono_flux_limiter
           !Check to ensure the vertical integral is not zero to avoid a divide
           !by zero error
           if ( abs(xm_vert_integral) < eps ) then
+#ifndef CLUBB_GPU
             write(fstderr,*) "Vertical integral of xm is zero;", & 
                              "mfl will remove spike at top of domain,", &
                              "but it will not conserve xm."
-
+#endif
             !Remove the spike at the top of the domain
             xm(i,nz) = xm_enter_mfl(i,nz)      
           else
@@ -967,8 +961,10 @@ module mono_flux_limiter
 
             !xm_adj_coef can not be smaller than -1
             if (xm_adj_coef < -0.99_core_rknd) then
+#ifndef CLUBB_GPU
               write(fstderr,*) "xm_adj_coef in mfl less than -0.99, " &
                                // "mx_adj_coef set to -0.99"
+#endif
               xm_adj_coef = -0.99_core_rknd
             endif
 
@@ -1000,25 +996,31 @@ module mono_flux_limiter
 
     end if
 
-    if ( l_stats_samp ) then
+    if ( stats_metadata%l_stats_samp ) then
       !$acc update host( wpxp, xm )
       do i = 1, ngrdcol
 
         call stat_end_update( nz, iwpxp_mfl, wpxp(i,:) / dt, & ! intent(in)
                               stats_zm(i) ) ! intent(inout)
 
-        call stat_end_update( nz, ixm_mfl, xm(i,:) / dt, & ! intent(in)
+        tmp_in(1) = 0.0_core_rknd
+        tmp_in(2:nz) = xm(i,2:nz)
+        call stat_end_update( nz, ixm_mfl, tmp_in / dt, & ! intent(in)
                               stats_zt(i) ) ! intent(inout)
 
         if ( solve_type == mono_flux_thlm ) then
-          call stat_update_var( ithlm_exit_mfl, xm(i,:), & ! intent(in)
+          tmp_in(1) = 0.0_core_rknd
+          tmp_in(2:nz) = xm(i,2:nz)
+          call stat_update_var( stats_metadata%ithlm_exit_mfl, tmp_in, & ! intent(in)
                                 stats_zt(i) ) ! intent(inout)
-          call stat_update_var( iwpthlp_exit_mfl, wpxp(i,:), & ! intent(in)
+          call stat_update_var( stats_metadata%iwpthlp_exit_mfl, wpxp(i,:), & ! intent(in)
                                 stats_zm(i) ) ! intent(inout)
         elseif ( solve_type == mono_flux_rtm ) then
-          call stat_update_var( irtm_exit_mfl, xm(i,:), & ! intent(in)
+          tmp_in(1) = 0.0_core_rknd
+          tmp_in(2:nz) = xm(i,2:nz)
+          call stat_update_var( stats_metadata%irtm_exit_mfl, tmp_in, & ! intent(in)
                                 stats_zt(i) ) ! intent(inout)
-          call stat_update_var( iwprtp_exit_mfl, wpxp(i,:), & ! intent(in)
+          call stat_update_var( stats_metadata%iwprtp_exit_mfl, wpxp(i,:), & ! intent(in)
                                 stats_zm(i) ) ! intent(inout)
         endif
       end do
@@ -1304,7 +1306,8 @@ module mono_flux_limiter
     real( kind = core_rknd ), dimension(ngrdcol,nz), intent(inout) ::  &
       rhs  ! Right hand side of tridiagonal matrix equation
 
-    real( kind = core_rknd ), dimension(ngrdcol,nz), intent(inout) :: &
+    !---------------------------- Output Variables ----------------------------
+    real( kind = core_rknd ), dimension(ngrdcol,nz), intent(out) :: &
       xm   ! Value of variable being solved for at timestep (t+1)   [units vary]
 
     !---------------------------- Local Variable ----------------------------
@@ -1351,6 +1354,7 @@ module mono_flux_limiter
   subroutine calc_turb_adv_range( nz, ngrdcol, gr, dt, &
                                   w_1_zm, w_2_zm, varnce_w_1_zm, varnce_w_2_zm, &
                                   mixt_frac_zm, &
+                                  stats_metadata, &
                                   stats_zm, &
                                   low_lev_effect, high_lev_effect )
 
@@ -1389,9 +1393,14 @@ module mono_flux_limiter
     use clubb_precision, only:  & 
         core_rknd ! Variable(s)
 
-    use stats_type, only: stats ! Type
+    use stats_type, only: &
+        stats ! Type
+
+    use stats_variables, only: &
+        stats_metadata_type
 
     implicit none
+
     ! Constant parameters 
     logical, parameter ::  &
       l_constant_thickness = .false.  ! Toggle constant or variable thickness.
@@ -1414,7 +1423,10 @@ module mono_flux_limiter
       w_2_zm,        & ! Mean w (2nd PDF component)                   [m/s]
       varnce_w_1_zm, & ! Variance of w (1st PDF component)            [m^2/s^2]
       varnce_w_2_zm, & ! Variance of w (2nd PDF component)            [m^2/s^2]
-      mixt_frac_zm    ! Weight of 1st PDF component (Sk_w dependent) [-]
+      mixt_frac_zm     ! Weight of 1st PDF component (Sk_w dependent) [-]
+
+    type (stats_metadata_type), intent(in) :: &
+      stats_metadata
 
     !------------------------- Inout Variables -------------------------
     type (stats), target, dimension(ngrdcol), intent(inout) :: &
@@ -1560,6 +1572,7 @@ module mono_flux_limiter
       call mean_vert_vel_up_down( nz, ngrdcol, &
                                   w_1_zm, w_2_zm, varnce_w_1_zm, varnce_w_2_zm, & !  In
                                   mixt_frac_zm, 0.0_core_rknd, w_min, & ! In
+                                  stats_metadata, & ! In
                                   stats_zm, & ! intent(inout)
                                   vert_vel_down, vert_vel_up ) ! intent(out)
 
@@ -1709,6 +1722,7 @@ module mono_flux_limiter
   subroutine mean_vert_vel_up_down( nz, ngrdcol, &
                                     w_1_zm, w_2_zm, varnce_w_1_zm, varnce_w_2_zm, &
                                     mixt_frac_zm, w_ref, w_min, &
+                                    stats_metadata, &
                                     stats_zm, &
                                     mean_w_down, mean_w_up )
 
@@ -1908,10 +1922,8 @@ module mono_flux_limiter
     use stats_type_utilities, only:  &
         stat_update_var  ! Procedure(s)
 
-    use stats_variables, only:  &
-        imean_w_up, &
-        imean_w_down, &
-        l_stats_samp
+    use stats_variables, only: &
+        stats_metadata_type
 
     use clubb_precision, only: &
         core_rknd ! Variable(s)
@@ -1935,6 +1947,9 @@ module mono_flux_limiter
 
     real( kind = core_rknd ), intent(in) ::  &
       w_ref          ! Reference velocity, w|_ref (normally = 0)   [m/s]
+
+    type (stats_metadata_type), intent(in) :: &
+        stats_metadata
 
     !------------------------- Inout Variables -------------------------
     type (stats), target, dimension(ngrdcol), intent(inout) :: &
@@ -1988,16 +2003,16 @@ module mono_flux_limiter
     end do
     !$acc end parallel loop
 
-    if ( l_stats_samp ) then
+    if ( stats_metadata%l_stats_samp ) then
       !$acc update host( mean_w_up, mean_w_down )
       do i = 1, ngrdcol
-         call stat_update_var( imean_w_up, mean_w_up(i,:), & ! intent(in)
+         call stat_update_var( stats_metadata%imean_w_up, mean_w_up(i,:), & ! intent(in)
                                stats_zm(i) ) ! intent(inout)
 
-         call stat_update_var( imean_w_down, mean_w_down(i,:), & ! intent(in)
+         call stat_update_var( stats_metadata%imean_w_down, mean_w_down(i,:), & ! intent(in)
                                stats_zm(i) ) ! intent(inout)
       end do
-    end if ! l_stats_samp
+    end if ! stats_metadata%l_stats_samp
 
     !$acc exit data delete( mean_w_down_1st, mean_w_down_2nd, mean_w_up_1st, mean_w_up_2nd )
 
@@ -2068,7 +2083,7 @@ module mono_flux_limiter
       mean_w_up_i      ! Mean w (>= w|_ref) from normal distribution [m/s]
 
     !------------------------- Local Variables -------------------------
-    real( kind = core_rknd ), dimension(ngrdcol,nz) :: &
+    real( kind = core_rknd ) :: &
         erf_cache, & ! erf/cdfnorm values
         exp_cache    ! exp() values
 
@@ -2079,8 +2094,6 @@ module mono_flux_limiter
     integer :: i, k  ! Vertical loop index
 
     !------------------------- Begin Code -------------------------
-
-    !$acc enter data create( erf_cache, exp_cache )
 
     invrs_sqrt_2pi = one / sqrt_2pi
 
@@ -2112,19 +2125,18 @@ module mono_flux_limiter
            mean_w_down_i(i,k) = 0.0_core_rknd
            mean_w_up_i(i,k)   = w_i_zm(i,k)
 
-        else ! The normal has significant values on both sides of w_ref.
+        else 
 
-           ! MKL functions are unavailable, use these scalar calculations instead
+           ! The normal has significant values on both sides of w_ref.
+           exp_cache = exp( -(w_ref-w_i_zm(i,k))**2 / (2.0_core_rknd*sigma_w_i**2) )
 
-           exp_cache(i,k) = exp( -(w_ref-w_i_zm(i,k))**2 / (2.0_core_rknd*sigma_w_i**2) )
+           erf_cache = erf( (w_ref-w_i_zm(i,k)) / (sqrt_2*sigma_w_i ) )
 
-           erf_cache(i,k) = erf( (w_ref-w_i_zm(i,k)) / (sqrt_2*sigma_w_i ) )
+           mean_w_down_i(i,k) = - sigma_w_i * invrs_sqrt_2pi * exp_cache  &
+                                + w_i_zm(i,k) * 0.5_core_rknd*( 1.0_core_rknd + erf_cache)
 
-           mean_w_down_i(i,k) =  - sigma_w_i * invrs_sqrt_2pi * exp_cache(i,k)  &
-                               + w_i_zm(i,k) * 0.5_core_rknd*( 1.0_core_rknd + erf_cache(i,k))
-
-           mean_w_up_i(i,k) =  + sigma_w_i * invrs_sqrt_2pi * exp_cache(i,k)  &
-                             + w_i_zm(i,k) * 0.5_core_rknd*( 1.0_core_rknd - erf_cache(i,k))
+           mean_w_up_i(i,k) = + sigma_w_i * invrs_sqrt_2pi * exp_cache  &
+                              + w_i_zm(i,k) * 0.5_core_rknd*( 1.0_core_rknd - erf_cache)
                              
         end if
         
@@ -2142,8 +2154,6 @@ module mono_flux_limiter
       mean_w_up_i(i,nz) = 0.0_core_rknd
     end do
     !$acc end parallel loop
-
-    !$acc exit data delete( erf_cache, exp_cache )
 
     return
 

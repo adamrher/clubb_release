@@ -16,7 +16,7 @@ module spurious_source_test
     !
     ! This function checks CLUBB's predictive equations for <rt> and <thl> for
     ! spurious sources and sinks.  The CLUBB code solves <rt> and <w'rt'>
-    ! together, as well as <thl> and <w'thl'> together, in subroutine
+    ! together, as well as <thl> and <w'thl'> together,10 in subroutine
     ! advance_xm_wpxp.  This function initializes profiles for a number of
     ! variables that are needed as input to that function.  It then calculates
     ! the vertical integrals of both <rt> and <thl> before the call to
@@ -87,16 +87,17 @@ module spurious_source_test
         implicit_coefs_terms,   & ! Variable Type
         init_pdf_implicit_coefs_terms
 
-    use parameters_model, only: &
-        sclr_dim    ! Variable(s)
-
     use clubb_precision, only: &
         core_rknd    ! Variable(s)
 
     use model_flags, only: &
         set_default_clubb_config_flags ! Procedure(s)
 
-    use stats_type, only: stats ! Type
+    use stats_type, only: &
+        stats ! Type
+
+    use stats_variables, only: &
+        stats_metadata_type
 
     implicit none
 
@@ -111,7 +112,13 @@ module spurious_source_test
       stats_sfc
 
     type (grid), target :: gr
-    
+
+    integer, parameter :: &
+      sclr_dim = 0 ! Number of passive scalars
+
+    real( kind = core_rknd ), dimension(1), parameter :: &
+      sclr_tol = 0.0_core_rknd
+
     integer, parameter :: &
       nz = 76 ! Number of vertical grid levels
               ! Note:  this needs to match the number of grid levels calculated
@@ -157,10 +164,6 @@ module spurious_source_test
     real( kind = core_rknd ), dimension(nz) ::  & 
       momentum_heights,      & ! Momentum level altitudes (input)      [m]
       thermodynamic_heights    ! Thermodynamic level altitudes (input) [m]
-
-    integer :: &
-      begin_height, & ! Lower bound for *_heights arrays [-]
-      end_height      ! Upper bound for *_heights arrays [-]
 
     real( kind = core_rknd ) ::  & 
       dt                 ! Timestep                                 [s]
@@ -247,6 +250,9 @@ module spurious_source_test
       thlm,   & ! th_l (liquid water potential temperature) [K]
       wpthlp    ! w'th_l'                                   [K m/s]
 
+    type (stats_metadata_type) :: &
+      stats_metadata
+
     ! Input/Output Variables
     real( kind = core_rknd ), dimension(1,nz,sclr_dim) ::  & 
       sclrm, wpsclrp !                                     [Units vary]
@@ -330,7 +336,7 @@ module spurious_source_test
 
     integer :: iter, k, i  ! Loop indices
 
-    real( kind = core_rknd ), dimension(nparams) :: &
+    real( kind = core_rknd ), dimension(1,nparams) :: &
       clubb_params    ! Array of CLUBB's tunable parameters    [units vary]
 
     type(nu_vertical_res_dep) :: &
@@ -362,17 +368,19 @@ module spurious_source_test
       C_invrs_tau_shear, C_invrs_tau_N2, C_invrs_tau_N2_wp2, &
       C_invrs_tau_N2_xp2, C_invrs_tau_N2_wpxp, C_invrs_tau_N2_clear_wp3, &
       C_invrs_tau_wpxp_Ri, C_invrs_tau_wpxp_N2_thresh, &
-      Cx_min, Cx_max, Richardson_num_min, Richardson_num_max, a3_coef_min, a_const, bv_efold
+      Cx_min, Cx_max, Richardson_num_min, Richardson_num_max, &
+      wpxp_Ri_exp, a3_coef_min, a_const, bv_efold, z_displace
 
     integer :: &
-      iiPDF_type,          & ! Selected option for the two-component normal
-                             ! (double Gaussian) PDF type to use for the w, rt,
-                             ! and theta-l (or w, chi, and eta) portion of
-                             ! CLUBB's multivariate, two-component PDF.
-      ipdf_call_placement, & ! Selected option for the placement of the call to
-                             ! CLUBB's PDF.
-      penta_solve_method,  & ! Option to set the penta-diagonal matrix solving method
-      tridiag_solve_method   ! Option to set the tri-diagonal matrix solving method
+      iiPDF_type,           & ! Selected option for the two-component normal
+                              ! (double Gaussian) PDF type to use for the w, rt,
+                              ! and theta-l (or w, chi, and eta) portion of
+                              ! CLUBB's multivariate, two-component PDF.
+      ipdf_call_placement,  & ! Selected option for the placement of the call to
+                              ! CLUBB's PDF.
+      penta_solve_method,   & ! Option to set the penta-diagonal matrix solving method
+      tridiag_solve_method, & ! Option to set the tri-diagonal matrix solving method
+      saturation_formula      ! Integer that stores the saturation formula to be used
 
     logical :: &
       l_use_precip_frac,            & ! Flag to use precipitation fraction in KK microphysics. The
@@ -489,15 +497,14 @@ module spurious_source_test
       l_mono_flux_lim_rtm,          & ! Flag to turn on monotonic flux limiter for rtm
       l_mono_flux_lim_um,           & ! Flag to turn on monotonic flux limiter for um
       l_mono_flux_lim_vm,           & ! Flag to turn on monotonic flux limiter for vm
-      l_mono_flux_lim_spikefix        ! Flag to implement monotonic flux limiter code that
+      l_mono_flux_lim_spikefix,     & ! Flag to implement monotonic flux limiter code that
                                       ! eliminates spurious drying tendencies at model top
-
+      l_host_applies_sfc_fluxes       ! Use to determine whether a host model has already applied the surface flux,
+                                      ! to avoid double counting.
     integer, parameter :: &
       order_xm_wpxp = 1, &
       order_xp2_xpyp = 2, &
       order_wp2_wp3 =3
-       
-    
 
 
     ! Set the default tunable parameter values
@@ -524,11 +531,11 @@ module spurious_source_test
                C_invrs_tau_N2_wp2, C_invrs_tau_N2_xp2, &
                C_invrs_tau_N2_wpxp, C_invrs_tau_N2_clear_wp3, &
                C_invrs_tau_wpxp_Ri, C_invrs_tau_wpxp_N2_thresh, &
-               Cx_min, Cx_max, Richardson_num_min, &
-               Richardson_num_max, a3_coef_min, a_const, bv_efold )
+               Cx_min, Cx_max, Richardson_num_min, Richardson_num_max, &
+               wpxp_Ri_exp, a3_coef_min, a_const, bv_efold, z_displace )
 
     ! Read in model parameter values
-    call read_parameters( iunit, namelist_filename, &
+    call read_parameters( 1, iunit, namelist_filename, &
                           C1, C1b, C1c, C2rt, C2thl, C2rtthl, &
                           C4, C_uu_shr, C_uu_buoy, C6rt, C6rtb, C6rtc, &
                           C6thl, C6thlb, C6thlc, C7, C7b, C7c, C8, C8b, C10, &
@@ -551,14 +558,15 @@ module spurious_source_test
                           C_invrs_tau_N2_wp2, C_invrs_tau_N2_xp2, &
                           C_invrs_tau_N2_wpxp, C_invrs_tau_N2_clear_wp3, &
                           C_invrs_tau_wpxp_Ri, C_invrs_tau_wpxp_N2_thresh, &
-                          Cx_min, Cx_max, Richardson_num_min, &
-                          Richardson_num_max, a3_coef_min, a_const, bv_efold, &
+                          Cx_min, Cx_max, Richardson_num_min, Richardson_num_max, &
+                          wpxp_Ri_exp, a3_coef_min, a_const, bv_efold, z_displace, &
                           clubb_params )
 
     call set_default_clubb_config_flags( iiPDF_type, &
                                          ipdf_call_placement, &
                                          penta_solve_method, &
                                          tridiag_solve_method, &
+                                         saturation_formula, &
                                          l_use_precip_frac, &
                                          l_predict_upwp_vpwp, &
                                          l_min_wp2_from_corr_wx, &
@@ -612,7 +620,8 @@ module spurious_source_test
                                          l_mono_flux_lim_rtm, &
                                          l_mono_flux_lim_um, &
                                          l_mono_flux_lim_vm, &
-                                         l_mono_flux_lim_spikefix )
+                                         l_mono_flux_lim_spikefix, &
+                                         l_host_applies_sfc_fluxes )
                                          
     ! Initialize pdf_implicit_coefs_terms
     call init_pdf_implicit_coefs_terms( nz, 1, sclr_dim, &
@@ -634,13 +643,12 @@ module spurious_source_test
     call setup_grid_api( nz, sfc_elevation, l_implemented,        &
                          grid_type, deltaz, zm_init, zm_top,      &
                          momentum_heights, thermodynamic_heights, &
-                         gr, begin_height, end_height          )
+                         gr )
 
     ! Calculate the value of nu for use in advance_xm_wpxp.
-    call adj_low_res_nu_api( gr%nz, grid_type, deltaz, &
-                             momentum_heights, thermodynamic_heights, &
-                             l_prescribed_avg_deltaz, mult_coef, &
-                             nu1, nu2, nu6, nu8, nu9, nu10, nu_hm, &
+    call adj_low_res_nu_api( gr, grid_type, deltaz, &
+                             clubb_params(1,:), &
+                             l_prescribed_avg_deltaz, &
                              nu_vert_res_dep )
 
     dt = 300.0_core_rknd
@@ -966,7 +974,7 @@ module spurious_source_test
               + ( Lv / ( Cp * exner(1,:) ) - ep2 * 300.0_core_rknd ) * rcm(1,:)
 
        ! Interpolate fields set on thermodynamic levels to momentum levels.
-       thv_ds_zm(1,:) = zt2zm( gr, thvm(1,:) )
+       thv_ds_zm(1,:) = max( zt2zm( gr, thvm(1,:) ), 0.0_core_rknd )
 
        ! Calculate the vertical integrals of rtm and thlm before the call to
        ! advance_xm_wpxp so that spurious source can be calculated.
@@ -978,7 +986,8 @@ module spurious_source_test
        = vertical_integral( gr%nz-1, rho_ds_zt(1,2:gr%nz), &
                             thlm(1,2:gr%nz), gr%dzt(1,2:gr%nz) )
        
-       call advance_xm_wpxp( nz, 1, gr, dt, sigma_sqd_w, wm_zm, wm_zt, wp2, &
+       call advance_xm_wpxp( nz, 1, sclr_dim, sclr_tol, gr, dt, &
+                             sigma_sqd_w, wm_zm, wm_zt, wp2, &
                              Lscale, wp3_on_wp2, wp3_on_wp2_zt, Kh_zt, Kh_zm, &
                              invrs_tau_C6_zm, tau_max_zm, Skw_zm, wp2rtp, rtpthvp, &
                              rtm_forcing, wprtp_forcing, rtm_ref, wp2thlp, &
@@ -994,10 +1003,11 @@ module spurious_source_test
                              um_forcing, vm_forcing, ug, vg, wpthvp, &
                              fcor, um_ref, vm_ref, up2, vp2, &
                              uprcp, vprcp, rc_coef, &
-                             clubb_params, nu_vert_res_dep, &
+                             clubb_params(1,:), nu_vert_res_dep, &
                              iiPDF_type, &
                              penta_solve_method, &
                              tridiag_solve_method, &
+                             saturation_formula, &
                              l_predict_upwp_vpwp, &
                              l_diffuse_rtm_and_thlm, &
                              l_stability_correct_Kh_N2_zm, &
@@ -1018,6 +1028,7 @@ module spurious_source_test
                              l_mono_flux_lim_vm, &
                              l_mono_flux_lim_spikefix, &
                              order_xm_wpxp, order_xp2_xpyp, order_wp2_wp3, &
+                             stats_metadata, &
                              stats_zt, stats_zm, stats_sfc, &
                              rtm, wprtp, thlm, wpthlp, &
                              sclrm, wpsclrp, um, upwp, vm, vpwp, &

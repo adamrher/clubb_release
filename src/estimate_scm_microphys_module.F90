@@ -12,8 +12,9 @@ module estimate_scm_microphys_module
   contains
 
 !-------------------------------------------------------------------------------
-  subroutine est_single_column_tndcy &
-             ( gr, dt, nz, num_samples, pdf_dim, &
+  subroutine est_single_column_tndcy( &
+               gr, dt, nz, num_samples, &
+               pdf_dim, hydromet_dim, hm_metadata, &
                X_nl_all_levs, X_mixt_comp_all_levs, lh_sample_point_weights, &
                pdf_params, precip_fracs, p_in_Pa, exner, rho, &
                dzq, hydromet, rcm, &
@@ -21,6 +22,8 @@ module estimate_scm_microphys_module
                lh_rc_clipped, lh_rv_clipped, &
                lh_Nc_clipped, &
                l_lh_instant_var_covar_src, &
+               saturation_formula, &
+               stats_metadata, &
                stats_zt, stats_zm, stats_sfc, stats_lh_zt, &
                lh_hydromet_mc, lh_hydromet_vel, lh_Ncm_mc, &
                lh_rvm_mc, lh_rcm_mc, lh_thlm_mc, &
@@ -40,8 +43,6 @@ module estimate_scm_microphys_module
 
     use grid_class, only: grid ! Type
 
-    use parameters_model, only: &
-      hydromet_dim ! Variable
 
     use parameters_microphys, only: &
       l_var_covar_src
@@ -53,9 +54,7 @@ module estimate_scm_microphys_module
       zt2zm
 
     use stats_variables, only: &
-      isilhs_variance_category, &
-      l_stats_samp,       &
-      ilh_rtp2_mc, ilh_thlp2_mc, ilh_wprtp_mc, ilh_wpthlp_mc, ilh_rtpthlp_mc
+        stats_metadata_type
 
     use stats_type_utilities, only: &
       stat_update_var ! Procedure
@@ -79,11 +78,8 @@ module estimate_scm_microphys_module
     use parameters_microphys, only: &
       l_silhs_KK_convergence_adj_mean ! Variable(s)
 
-    use array_index, only: &
-      iiNr, & ! Variable(s)
-      iirr, &
-      iiPDF_chi, &
-      iiPDF_w
+    use corr_varnce_module, only: &
+      hm_metadata_type
 
     use lh_microphys_var_covar_module, only: &
       lh_microphys_var_covar_driver   ! Procedure
@@ -101,14 +97,6 @@ module estimate_scm_microphys_module
 
     implicit none
 
-    type(stats), target, intent(inout) :: &
-      stats_zt, &
-      stats_zm, &
-      stats_sfc, &
-      stats_lh_zt
-
-    type (grid), target, intent(in) :: gr
-
     ! External
 #include "microphys_interface.inc"
 
@@ -119,13 +107,19 @@ module estimate_scm_microphys_module
       l_latin_hypercube = .true. ! We are the Latin hypercube!
 
     ! Input Variables
+    type (grid), target, intent(in) :: gr
+
     real( kind = core_rknd ), intent(in) :: &
       dt ! Model timestep       [s]
 
     integer, intent(in) :: &
       nz,            & ! Number of vertical levels
       num_samples,   & ! Number of calls to microphysics
-      pdf_dim     ! Number of variates
+      pdf_dim,       & ! Number of variates
+      hydromet_dim
+
+    type (hm_metadata_type), intent(in) :: &
+      hm_metadata
 
     real( kind = core_rknd ), dimension(num_samples,nz,pdf_dim), intent(in) :: &
       X_nl_all_levs    ! Sample that is transformed ultimately to normal-lognormal
@@ -161,6 +155,19 @@ module estimate_scm_microphys_module
 
     logical, intent(in) :: &
       l_lh_instant_var_covar_src ! Produce instantaneous var/covar tendencies [-]
+
+    integer, intent(in) :: &
+      saturation_formula ! Integer that stores the saturation formula to be used
+
+    type (stats_metadata_type), intent(in) :: &
+      stats_metadata
+
+    ! InOut Variables
+    type(stats), target, intent(inout) :: &
+      stats_zt, &
+      stats_zm, &
+      stats_sfc, &
+      stats_lh_zt
 
     ! Output Variables
 
@@ -222,7 +229,19 @@ module estimate_scm_microphys_module
 
     integer :: ivar, sample
 
+    ! Just to avoid typing hm_metadata%iiPDF_x everywhere
+    integer :: &
+      iiNr, &
+      iirr, &
+      iiPDF_chi, &
+      iiPDF_w
+
     ! ---- Begin Code ----
+
+    iiNr      = hm_metadata%iiNr
+    iirr      = hm_metadata%iirr
+    iiPDF_chi = hm_metadata%iiPDF_chi
+    iiPDF_w   = hm_metadata%iiPDF_w
 
     w_all_points   = real( X_nl_all_levs(:,:,iiPDF_w), kind=core_rknd )
     chi_all_points = real( X_nl_all_levs(:,:,iiPDF_chi), kind=core_rknd )
@@ -230,6 +249,7 @@ module estimate_scm_microphys_module
     call copy_X_nl_into_hydromet_all_pts &
          ( nz, pdf_dim, num_samples, & ! Intent(in)
            X_nl_all_levs,                & ! Intent(in)
+           hydromet_dim, hm_metadata, & ! Intent(in)
            hydromet,                     & ! Intent(in)
            hydromet_all_points,          & ! Intent(out)
            Ncn_all_points )                ! Intent(out)
@@ -239,13 +259,16 @@ module estimate_scm_microphys_module
       cloud_frac_unused = unused_var
       w_std_dev_unused  = unused_var
       ! Call the microphysics scheme to obtain a sample point
-      call microphys_sub &
-           ( gr, dt, nz, & ! In
+      call microphys_sub( &
+             gr, dt, nz, & ! In
+             hydromet_dim, hm_metadata, & ! In
              l_latin_hypercube, lh_thl_clipped(sample,:), w_all_points(sample,:), p_in_Pa, & ! In
              exner, rho, cloud_frac_unused, w_std_dev_unused, & ! In
              dzq, lh_rc_clipped(sample,:), lh_Nc_clipped(sample,:), & ! In
              chi_all_points(sample,:), lh_rv_clipped(sample,:), & ! In
              hydromet_all_points(sample,:,:), & ! In
+             saturation_formula, &
+             stats_metadata, & ! In
              lh_hydromet_mc_all(sample,:,:), lh_hydromet_vel_all(sample,:,:), & ! Out
              lh_Ncm_mc_all(sample,:), & ! Out
              lh_rcm_mc_all(sample,:), lh_rvm_mc_all(sample,:), lh_thlm_mc_all(sample,:), & ! Out
@@ -272,12 +295,12 @@ module estimate_scm_microphys_module
       lh_rtpthlp_mc = zt2zm( gr, lh_rtpthlp_mc_zt )
 
       ! Stats sampling
-      if ( l_stats_samp ) then
-        call stat_update_var( ilh_rtp2_mc, lh_rtp2_mc, stats_zm )
-        call stat_update_var( ilh_thlp2_mc, lh_thlp2_mc, stats_zm )
-        call stat_update_var( ilh_wprtp_mc, lh_wprtp_mc, stats_zm )
-        call stat_update_var( ilh_wpthlp_mc, lh_wpthlp_mc, stats_zm )
-        call stat_update_var( ilh_rtpthlp_mc, lh_rtpthlp_mc, stats_zm )
+      if ( stats_metadata%l_stats_samp ) then
+        call stat_update_var( stats_metadata%ilh_rtp2_mc, lh_rtp2_mc, stats_zm )
+        call stat_update_var( stats_metadata%ilh_thlp2_mc, lh_thlp2_mc, stats_zm )
+        call stat_update_var( stats_metadata%ilh_wprtp_mc, lh_wprtp_mc, stats_zm )
+        call stat_update_var( stats_metadata%ilh_wpthlp_mc, lh_wpthlp_mc, stats_zm )
+        call stat_update_var( stats_metadata%ilh_rtpthlp_mc, lh_rtpthlp_mc, stats_zm )
       end if
 
     else ! .not. l_var_covar_src
@@ -315,10 +338,11 @@ module estimate_scm_microphys_module
                                                          lh_sample_point_weights )
 
     if ( lh_microphys_type /= lh_microphys_non_interactive ) then
-      call microphys_stats_accumulate( microphys_stats_zt_avg, l_stats_samp, stats_zt )
-      call microphys_stats_accumulate( microphys_stats_sfc_avg, l_stats_samp, stats_sfc )
+      call microphys_stats_accumulate( microphys_stats_zt_avg, stats_metadata, stats_zt )
+      call microphys_stats_accumulate( microphys_stats_sfc_avg, stats_metadata, stats_sfc )
     else
-      call silhs_noninteractive_stats( microphys_stats_zt_avg, l_stats_samp, &
+      call silhs_noninteractive_stats( microphys_stats_zt_avg, &
+                                       stats_metadata, &
                                        stats_lh_zt )
     end if
 
@@ -326,32 +350,36 @@ module estimate_scm_microphys_module
     if ( l_silhs_KK_convergence_adj_mean ) then
       call adjust_KK_src_means( dt, nz, exner, rcm, hydromet(:,iirr),           & ! intent(in)
                                 hydromet(:,iiNr), hydromet,                     & ! intent(in)
-                                microphys_stats_zt_avg, l_stats_samp,           & ! intent(in)
+                                hydromet_dim, hm_metadata%iiri,              & ! intent(in)
+                                microphys_stats_zt_avg,                         & ! intent(in)
+                                stats_metadata,                                 & ! intent(in)
                                 stats_lh_zt,                                    & ! intent(inout)
                                 lh_hydromet_vel(:,iirr),                        & ! intent(inout)
                                 lh_hydromet_vel(:,iiNr),                        & ! intent(inout)
-                                lh_hydromet_mc(:,iirr), lh_hydromet_mc(:,iiNr),& ! intent(out)
-                                lh_rvm_mc, lh_rcm_mc, lh_thlm_mc )                 ! intent(out)
+                                lh_hydromet_mc(:,iirr), lh_hydromet_mc(:,iiNr), & ! intent(out)
+                                lh_rvm_mc, lh_rcm_mc, lh_thlm_mc )                ! intent(out)
     end if
 
     ! Invoke the SILHS category variance sampler (if desired by user)!!
 
-    if ( l_stats_samp ) then
+    if ( stats_metadata%l_stats_samp ) then
 
-      if ( allocated( isilhs_variance_category ) ) then
+      if ( allocated( stats_metadata%isilhs_variance_category ) ) then
 
-        if( isilhs_variance_category(1) > 0 ) then
-          call silhs_category_variance_driver &
-               ( nz, num_samples, pdf_dim, hydromet_dim, X_nl_all_levs, & ! Intent(in)
+        if( stats_metadata%isilhs_variance_category(1) > 0 ) then
+          call silhs_category_variance_driver( &
+                 nz, num_samples, pdf_dim, hydromet_dim, hm_metadata,    & ! Intent(in)
+                 X_nl_all_levs,                                             & ! Intent(in)
                  X_mixt_comp_all_levs, microphys_stats_zt_all,              & ! Intent(in)
                  lh_hydromet_mc_all, lh_sample_point_weights, pdf_params,   & ! Intent(in)
                  precip_fracs,                                              & ! intent(in)
+                 stats_metadata,                                            & ! intent(in)
                  stats_lh_zt )                                                ! intent(inout)
-        end if ! isilhs_variance_category(1) > 0
+        end if ! stats_metadata%isilhs_variance_category(1) > 0
 
-      end if ! allocated( isilhs_variance_category ) 
+      end if ! allocated( stats_metadata%isilhs_variance_category ) 
 
-    end if ! l_stats_samp
+    end if ! stats_metadata%l_stats_samp
 
     ! Cleanup microphys_stats_vars objects
     do ivar=1, num_samples
@@ -440,7 +468,8 @@ module estimate_scm_microphys_module
   !-----------------------------------------------------------------------
 
   !-----------------------------------------------------------------------
-  subroutine silhs_noninteractive_stats( microphys_stats_zt_avg, l_stats_samp, &
+  subroutine silhs_noninteractive_stats( microphys_stats_zt_avg, &
+                                         stats_metadata, &
                                          stats_lh_zt )
 
   ! Description:
@@ -456,88 +485,75 @@ module estimate_scm_microphys_module
       microphys_stats_vars_type, &  ! Type
       microphys_get_var ! Procedure
 
-    use stats_variables, only: &
-      irrm_auto, &
-      irrm_accr, &
-      irrm_evap, &
-      iNrm_auto, &
-      iNrm_evap, &
-      ilh_rrm_auto, &
-      ilh_rrm_accr, &
-      ilh_rrm_evap, &
-      ilh_Nrm_auto, &
-      ilh_Nrm_evap, &
-      im_vol_rad_rain, &
-      ilh_m_vol_rad_rain, &
-      irrm_mc_nonadj, &
-      ilh_rrm_mc_nonadj
-
     use stats_type_utilities, only: &
       stat_update_var  ! Procedure
 
     use parameters_microphys, only: &
       microphys_scheme    ! Variable
 
-    use stats_type, only: stats ! Type
+    use stats_type, only: &
+      stats ! Type
+
+    use stats_variables, only: &
+      stats_metadata_type
 
     implicit none
 
-    type(stats), target, intent(inout) :: &
-      stats_lh_zt
-
-    ! Input Variables
+    !--------------------------- Input Variables ---------------------------
     type(microphys_stats_vars_type), intent(in) :: &
       microphys_stats_zt_avg  ! Statistics structure from the microphysics scheme
 
-    logical, intent(in) :: &
-      l_stats_samp   ! Whether to sample this timestep
+    type (stats_metadata_type), intent(in) :: &
+      stats_metadata
 
-  !-----------------------------------------------------------------------
+    !--------------------------- InOut Variables ---------------------------
+    type(stats), target, intent(inout) :: &
+      stats_lh_zt
 
-    !----- Begin Code -----
+    !--------------------------- Begin Code ---------------------------
 
     ! Statistical sampling
-    if ( l_stats_samp ) then
+    if ( stats_metadata%l_stats_samp ) then
 
-      if ( ilh_rrm_auto > 0 ) then
-        call stat_update_var( ilh_rrm_auto, microphys_get_var( &
-             irrm_auto, microphys_stats_zt_avg ), stats_lh_zt )
+      if ( stats_metadata%ilh_rrm_auto > 0 ) then
+        call stat_update_var( stats_metadata%ilh_rrm_auto, microphys_get_var( &
+             stats_metadata%irrm_auto, microphys_stats_zt_avg ), stats_lh_zt )
       end if
 
-      if ( ilh_rrm_accr > 0 ) then
-        call stat_update_var( ilh_rrm_accr, microphys_get_var( &
-             irrm_accr, microphys_stats_zt_avg ), stats_lh_zt )
+      if ( stats_metadata%ilh_rrm_accr > 0 ) then
+        call stat_update_var( stats_metadata%ilh_rrm_accr, microphys_get_var( &
+             stats_metadata%irrm_accr, microphys_stats_zt_avg ), stats_lh_zt )
       end if
 
-      if ( ilh_rrm_evap > 0 ) then
-        call stat_update_var( ilh_rrm_evap, microphys_get_var( &
-             irrm_evap, microphys_stats_zt_avg ), stats_lh_zt )
+      if ( stats_metadata%ilh_rrm_evap > 0 ) then
+        call stat_update_var( stats_metadata%ilh_rrm_evap, microphys_get_var( &
+             stats_metadata%irrm_evap, microphys_stats_zt_avg ), stats_lh_zt )
       end if
 
-      if ( ilh_Nrm_auto > 0 ) then
-        call stat_update_var( ilh_Nrm_auto, microphys_get_var( &
-             iNrm_auto, microphys_stats_zt_avg ), stats_lh_zt )
+      if ( stats_metadata%ilh_Nrm_auto > 0 ) then
+        call stat_update_var( stats_metadata%ilh_Nrm_auto, microphys_get_var( &
+             stats_metadata%iNrm_auto, microphys_stats_zt_avg ), stats_lh_zt )
       end if
 
-      if ( ilh_Nrm_evap > 0 ) then
-        call stat_update_var( ilh_Nrm_evap, microphys_get_var( &
-             iNrm_evap, microphys_stats_zt_avg ), stats_lh_zt )
+      if ( stats_metadata%ilh_Nrm_evap > 0 ) then
+        call stat_update_var( stats_metadata%ilh_Nrm_evap, microphys_get_var( &
+             stats_metadata%iNrm_evap, microphys_stats_zt_avg ), stats_lh_zt )
       end if
 
       if ( trim( microphys_scheme ) == "khairoutdinov_kogan" ) then
         ! These variables are output only from KK microphysics.
-        if ( ilh_m_vol_rad_rain > 0 ) then
-          call stat_update_var( ilh_m_vol_rad_rain, microphys_get_var( &
-               im_vol_rad_rain, microphys_stats_zt_avg ), stats_lh_zt )
+        if ( stats_metadata%ilh_m_vol_rad_rain > 0 ) then
+          call stat_update_var( stats_metadata%ilh_m_vol_rad_rain, microphys_get_var( &
+               stats_metadata%im_vol_rad_rain, microphys_stats_zt_avg ), stats_lh_zt )
         end if
 
-        if ( ilh_rrm_mc_nonadj > 0 ) then
-          call stat_update_var( ilh_rrm_mc_nonadj, microphys_get_var( &
-               irrm_mc_nonadj, microphys_stats_zt_avg ), stats_lh_zt )
+        if ( stats_metadata%ilh_rrm_mc_nonadj > 0 ) then
+          call stat_update_var( stats_metadata%ilh_rrm_mc_nonadj, microphys_get_var( &
+               stats_metadata%irrm_mc_nonadj, microphys_stats_zt_avg ), stats_lh_zt )
         end if
       end if ! trim( microphys_scheme ) == "khairoutdinov_kogan"
 
-    end if ! l_stats_samp
+    end if ! stats_metadata%l_stats_samp
 
     return
   end subroutine silhs_noninteractive_stats
@@ -545,7 +561,9 @@ module estimate_scm_microphys_module
 
   !-----------------------------------------------------------------------------
   subroutine adjust_KK_src_means( dt, nz, exner, rcm, rrm, Nrm, hydromet, &
-                                  microphys_stats_zt, l_stats_samp,       &
+                                  hydromet_dim, iiri,                     &
+                                  microphys_stats_zt,                     &
+                                  stats_metadata,                         &
                                   stats_lh_zt,                            &
                                   lh_Vrr, lh_VNr,                         &
                                   rrm_mc, Nrm_mc,                         &
@@ -576,28 +594,18 @@ module estimate_scm_microphys_module
     use constants_clubb, only: &
         zero    ! Constant
 
-    use parameters_model, only: &
-        hydromet_dim    ! Variable(s)
-
     use stats_type_utilities, only: &
         stat_update_var ! Procedure
-
-    use stats_variables, only: &
-        irrm_auto,       &
-        irrm_accr,       &
-        irrm_evap,       &
-        iNrm_auto,       &
-        iNrm_evap,       &
-        ilh_rrm_src_adj, &
-        ilh_Nrm_src_adj, &
-        ilh_rrm_evap_adj,&
-        ilh_Nrm_evap_adj
 
     use microphys_stats_vars_module, only: &
         microphys_stats_vars_type, &     ! Type
         microphys_get_var                ! Procedure
 
-    use stats_type, only: stats ! Type
+    use stats_type, only: &
+        stats ! Type
+
+    use stats_variables, only: &
+        stats_metadata_type
 
     implicit none
 
@@ -611,12 +619,14 @@ module estimate_scm_microphys_module
       ! Whether to adjust rrm_evap to not over-evaporate rain
       l_evap_adj_enabled = .true.
 
-    ! Input variables
+    !-------------------------- Input variables --------------------------
     real( kind = core_rknd ), intent(in) :: &
       dt   ! Model timestep
 
     integer, intent(in) :: &
-      nz   ! Number of vertical grid levels
+      nz, &   ! Number of vertical grid levels
+      hydromet_dim, &
+      iiri
 
     real( kind = core_rknd ), dimension(nz), intent(in) :: &
       exner, & ! Exner function                            [-]
@@ -630,15 +640,15 @@ module estimate_scm_microphys_module
     type(microphys_stats_vars_type), intent(in) :: &
       microphys_stats_zt     ! Statistics variables        [units vary]
 
-    logical, intent(in) :: &
-      l_stats_samp   ! Whether to sample this timestep
+    type (stats_metadata_type), intent(in) :: &
+      stats_metadata
 
-    ! Input/Output Variables
+    !-------------------------- InOut Variables --------------------------
     real( kind = core_rknd ), dimension(nz), intent(inout) :: &
       lh_Vrr, &         ! Mean sedimentation velocity of < r_r > [m/s]
       lh_VNr            ! Mean sedimentation velocity of < N_r > [m/s]
 
-    ! Output variables
+    !-------------------------- Output variables --------------------------
     real( kind = core_rknd ), dimension(nz), intent(out) :: &
       rrm_mc, & ! Mean change in rain due to microphysics [(kg/kg)/s] 
       Nrm_mc,    & ! Mean change in Nrm due to microphysics  [(kg/kg)/s]
@@ -646,7 +656,7 @@ module estimate_scm_microphys_module
       rcm_mc,    & ! Time tendency of rcm                    [(kg/kg)/s]
       thlm_mc      ! Time tendency of thlm                   [(kg/kg)/s]
 
-    ! Local Variables
+    !-------------------------- Local Variables --------------------------
     real( kind = core_rknd ), dimension(nz) :: &
       rrm_evap, & ! Mean change in rain due to evap           [(kg/kg)/s]
       rrm_auto, & ! Mean change in rain due to autoconversion [(kg/kg)/s]
@@ -659,7 +669,7 @@ module estimate_scm_microphys_module
 
     integer :: k, cloud_top_level
 
-    !----- Begin code -----
+    !-------------------------- Begin code --------------------------
 
     ! Initialize output
     rrm_mc = zero
@@ -668,12 +678,12 @@ module estimate_scm_microphys_module
     rcm_mc = zero
     thlm_mc = zero
 
-    rrm_auto = microphys_get_var( irrm_auto, microphys_stats_zt )
-    rrm_accr = microphys_get_var( irrm_accr, microphys_stats_zt )
-    rrm_evap = microphys_get_var( irrm_evap, microphys_stats_zt )
+    rrm_auto = microphys_get_var( stats_metadata%irrm_auto, microphys_stats_zt )
+    rrm_accr = microphys_get_var( stats_metadata%irrm_accr, microphys_stats_zt )
+    rrm_evap = microphys_get_var( stats_metadata%irrm_evap, microphys_stats_zt )
 
-    Nrm_auto    = microphys_get_var( iNrm_auto,    microphys_stats_zt )
-    Nrm_evap    = microphys_get_var( iNrm_evap,    microphys_stats_zt )
+    Nrm_auto    = microphys_get_var( stats_metadata%iNrm_auto,    microphys_stats_zt )
+    Nrm_evap    = microphys_get_var( stats_metadata%iNrm_evap,    microphys_stats_zt )
 
     ! Loop over each vertical level above the lower boundary
     do k = 2, nz, 1
@@ -702,7 +712,8 @@ module estimate_scm_microphys_module
 
     end do
 
-    cloud_top_level = get_cloud_top_level( nz, rcm, hydromet )
+    cloud_top_level = get_cloud_top_level( nz, rcm, hydromet, &
+                                           hydromet_dim, iiri )
 
     !!! Mean sedimentation above cloud top should have a value of 0.
     if ( cloud_top_level > 1 ) then
@@ -727,25 +738,25 @@ module estimate_scm_microphys_module
     thlm_mc(nz) = zero
 
     ! Statistical sampling
-    if ( l_stats_samp ) then
+    if ( stats_metadata%l_stats_samp ) then
 
-      if ( ilh_rrm_src_adj > 0 ) then
-        call stat_update_var( ilh_rrm_src_adj, adj_terms%rrm_src_adj, stats_lh_zt )
+      if ( stats_metadata%ilh_rrm_src_adj > 0 ) then
+        call stat_update_var( stats_metadata%ilh_rrm_src_adj, adj_terms%rrm_src_adj, stats_lh_zt )
       end if
 
-      if ( ilh_Nrm_src_adj > 0 ) then
-        call stat_update_var( ilh_Nrm_src_adj, adj_terms%Nrm_src_adj, stats_lh_zt )
+      if ( stats_metadata%ilh_Nrm_src_adj > 0 ) then
+        call stat_update_var( stats_metadata%ilh_Nrm_src_adj, adj_terms%Nrm_src_adj, stats_lh_zt )
       end if
 
-      if ( ilh_rrm_evap_adj > 0 ) then
-        call stat_update_var( ilh_rrm_evap_adj, adj_terms%rrm_evap_adj, stats_lh_zt )
+      if ( stats_metadata%ilh_rrm_evap_adj > 0 ) then
+        call stat_update_var( stats_metadata%ilh_rrm_evap_adj, adj_terms%rrm_evap_adj, stats_lh_zt )
       end if
 
-      if ( ilh_Nrm_evap_adj > 0 ) then
-        call stat_update_var( ilh_Nrm_evap_adj, adj_terms%Nrm_evap_adj, stats_lh_zt )
+      if ( stats_metadata%ilh_Nrm_evap_adj > 0 ) then
+        call stat_update_var( stats_metadata%ilh_Nrm_evap_adj, adj_terms%Nrm_evap_adj, stats_lh_zt )
       end if
 
-    end if ! l_stats_samp
+    end if ! stats_metadata%l_stats_samp
 
   end subroutine adjust_KK_src_means
   !-----------------------------------------------------------------------

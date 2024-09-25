@@ -68,7 +68,11 @@ program clubb_standalone
     C_invrs_tau_shear, C_invrs_tau_N2, C_invrs_tau_N2_wp2, &
     C_invrs_tau_N2_xp2, C_invrs_tau_N2_wpxp, C_invrs_tau_N2_clear_wp3, &
     C_invrs_tau_wpxp_Ri, C_invrs_tau_wpxp_N2_thresh, &
-    Cx_min, Cx_max, Richardson_num_min, Richardson_num_max, a3_coef_min, a_const, bv_efold
+    Cx_min, Cx_max, Richardson_num_min, Richardson_num_max, &
+    wpxp_Ri_exp, a3_coef_min, a_const, bv_efold, z_displace
+
+  integer :: &
+    ngrdcol = 1
 
 !-----------------------------------------------------------------------
 
@@ -98,11 +102,11 @@ program clubb_standalone
                C_invrs_tau_N2_wp2, C_invrs_tau_N2_xp2, &
                C_invrs_tau_N2_wpxp, C_invrs_tau_N2_clear_wp3, &
                C_invrs_tau_wpxp_Ri, C_invrs_tau_wpxp_N2_thresh, &
-               Cx_min, Cx_max, Richardson_num_min, &
-               Richardson_num_max, a3_coef_min, a_const, bv_efold )
+               Cx_min, Cx_max, Richardson_num_min, Richardson_num_max, &
+               wpxp_Ri_exp, a3_coef_min, a_const, bv_efold, z_displace )
 
   ! Read in model parameter values
-  call read_parameters( iunit, namelist_filename, &
+  call read_parameters( ngrdcol, iunit, namelist_filename, &
                         C1, C1b, C1c, C2rt, C2thl, C2rtthl, &
                         C4, C_uu_shr, C_uu_buoy, C6rt, C6rtb, C6rtc, &
                         C6thl, C6thlb, C6thlc, C7, C7b, C7c, C8, C8b, C10, &
@@ -125,15 +129,15 @@ program clubb_standalone
                         C_invrs_tau_N2_wp2, C_invrs_tau_N2_xp2, &
                         C_invrs_tau_N2_wpxp, C_invrs_tau_N2_clear_wp3, &
                         C_invrs_tau_wpxp_Ri, C_invrs_tau_wpxp_N2_thresh, &
-                        Cx_min, Cx_max, Richardson_num_min, &
-                        Richardson_num_max, a3_coef_min, a_const, bv_efold, &
+                        Cx_min, Cx_max, Richardson_num_min, Richardson_num_max, &
+                        wpxp_Ri_exp, a3_coef_min, a_const, bv_efold, z_displace, &
                         params )
 
   ! Initialize status of run 
   err_code = clubb_no_error
 
   ! Run the model
-  call run_clubb( params, namelist_filename, l_stdout )
+  call run_clubb( ngrdcol, params, namelist_filename, l_stdout )
 
   if ( err_code == clubb_fatal_error ) then
     error stop "Fatal error in clubb, check your parameter values and timestep"

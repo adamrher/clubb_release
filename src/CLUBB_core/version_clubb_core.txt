@@ -1,91 +1,67 @@
-commit a1bc7132bad1616530c67bbf98b3d0ccfa3e0dc0
-Author: vlarson <vlarson@uwm.edu>
-Date:   Wed Aug 23 14:15:19 2023 -0500
+commit 73d60f64a17ad0db20fc8ff6d24543bf8ea66383
+Author: huebleruwm <huebler@uwm.edu>
+Date:   Wed Jun 5 00:12:59 2024 -0600
 
-    Adds basic cost function printouts to QuadTune.
-    Also adds SWCF_RMSE metric.
+    Making the only change required to make clubb run with openacc in cam.
+
+commit a67e22194ccac507c0dc1b684db1336cf93054fe
+Author: huebler <huebler@uwm.edu>
+Date:   Mon Jun 3 17:09:24 2024 -0500
+
+    Making multicol diffness script rely on the largest difference detected, rather the the sum/total of differences. This is essentially to relax the cpu vs gpu diffness test because mpace_b is noisey and often causes the test to fail for innocent bit changing commits. Looking at the largest difference does have the advantage of the check being less sensitive to case differences, such as number of timesteps, vertical levels, number of columns, etc.
+
+commit ed26ee90739d5041950bc843717fa39c922934ed
+Author: huebler <huebler@uwm.edu>
+Date:   Mon Jun 3 16:47:32 2024 -0500
+
+    Surrounding print statement with debug flag check.
+
+commit e9cf9a87c16e65f678c6146663dbb8ff9b22b5c7
+Author: huebler <huebler@uwm.edu>
+Date:   Mon Jun 3 16:29:06 2024 -0500
+
+    Making the f in f90 capital for consistency.
+
+commit 4a157a41ada7c94ad9d4d626d8effb2f89b787ab
+Author: vlarson <vlarson@uwm.edu>
+Date:   Mon Jun 3 12:13:17 2024 -0500
+
+    QuadTune: Moves plotting code to new fnc, createFigs.
     
     For #910.
 
-commit 8f7ec02116293f4a2f09d5a92edbf87e56686e5e
-Author: vlarson <vlarson@uwm.edu>
-Date:   Mon Aug 21 13:45:28 2023 -0500
+commit 7d2369cb2db29fbc630c678a19d08445c261c08d
+Merge: a3a589a1c 678e448be
+Author: bmg929 <bmg2@uwm.edu>
+Date:   Wed May 29 19:16:09 2024 -0500
 
-    Fixes bug in QuadTune's code that prescribes parameter values.
-    Also fixes divide-by-zero warning message in dpMin2Pt plotting code.
+    Merge branch 'master' of github.com:larson-group/clubb
+
+commit a3a589a1cfcc34b2d84a163f958bd9d4090d9bff
+Author: bmg929 <bmg2@uwm.edu>
+Date:   Wed May 29 19:14:59 2024 -0500
+
+    The variable rc_coef_zm needed to be passed in and saved from
+    timestep-to-timestep rather than rc_coef. The results of this
+    change are BIT_CHANGING.
+
+commit 678e448bed0d6791b77f9f9f361bf99463b15fcf
+Author: vlarson <vlarson@uwm.edu>
+Date:   Tue May 28 08:53:26 2024 -0500
+
+    QuadTune: Brings in CAM regional files.
     
     For #910.
 
-commit ad7158d4527e636e07a389e813d60013ab2afccb
-Author: vlarson <vlarson@uwm.edu>
-Date:   Fri Aug 18 15:28:17 2023 -0500
+commit 89fd4bd76b19d2a6a23300325bb65c9127fea590
+Merge: a29122b39 4fa1344ba
+Author: bmg929 <bmg2@uwm.edu>
+Date:   Thu May 16 14:52:09 2024 -0500
 
-    Hides print statements in RegTune by using beVerbose=False.
-    
-    For #910.
+    Merge branch 'master' of github.com:larson-group/clubb
 
-commit 9d35ffa7e05b85efb23d21700bcf355f007c2b7d
-Author: vlarson <vlarson@uwm.edu>
-Date:   Thu Aug 17 16:49:07 2023 -0500
+commit a29122b397fd78f5b4fede7c8fd520e927660b4b
+Author: bmg929 <bmg2@uwm.edu>
+Date:   Thu May 16 14:51:48 2024 -0500
 
-    For RegTune, adds capability to prescribe (not tune) a parameter
-    to a value that is different from the default.
-    The code has not been checked, but it does run and produce plots.
-    
-    For #910.
-
-commit 3ac0cb6b68cff942267f3230f210eaab5aedc182
-Author: vlarson <vlarson@uwm.edu>
-Date:   Wed Aug 16 17:04:19 2023 -0500
-
-    Creates new function, setUpPreliminaries, in RegTune.
-    setUpPreliminaries calculates some basic quantities
-    that are used later.
-    As part of this refactoring, a number of functions
-    were moved from analyze_sensitivity_matrix to
-    set_up_dashboard_inputs.
-    
-    For #910.
-
-commit 31f76a7219f3ed336cc7b2b1159cae4781e67289
-Author: vlarson <vlarson@uwm.edu>
-Date:   Wed Aug 16 10:42:06 2023 -0500
-
-    For clarity, renames figures in RegTune.
-    
-    For #910.
-
-commit edccdfbf9c5f8ed7c089bee46e30801098af8841
-Author: vlarson <vlarson@uwm.edu>
-Date:   Wed Aug 16 08:48:18 2023 -0500
-
-    For RegTune, adds color-coded matrix of correlations among parameter vectors.
-    Also, this commit separates the three-dot panel plot into its own function.
-    
-    For #910.
-
-commit b0101dc46f5324451c8273188032bda60d135e41
-Author: vlarson <vlarson@uwm.edu>
-Date:   Tue Aug 8 15:03:44 2023 -0500
-
-    In RegTune, normalizes metrics by a user-specified number
-    rather than the observed value of the metric.
-    
-    For #910.
-
-commit 9ada7441e588502eeb7f757cd0d618d8803bd08d
-Author: vlarson <vlarson@uwm.edu>
-Date:   Tue Aug 8 09:21:11 2023 -0500
-
-    For RegTune, defaults to polynomial fit for sensitivity matrix
-    and adds observations of sea-level pressure (PSL).
-    
-    For #910.
-
-commit 9324242cc87f0d692e5bc39f32ac50f3be0b928b
-Author: vlarson <vlarson@uwm.edu>
-Date:   Thu Aug 3 14:27:51 2023 -0500
-
-    For RegTune, adds quadratic curves to three-dot plot.
-    
-    For #910.
+    Fixing a bug. Does not change default results.

@@ -37,7 +37,7 @@ module inputfields
     l_input_rtpthvp = .false., l_input_thlpthvp = .false., &
     l_input_wp2rtp = .false., l_input_wp2thlp = .false., &
     l_input_uprcp = .false., l_input_vprcp = .false., &
-    l_input_rc_coef = .false., l_input_wp4 = .false., &
+    l_input_rc_coef_zm = .false., l_input_wp4 = .false., &
     l_input_wpup2 = .false., l_input_wpvp2 = .false., &
     l_input_wp2up2 = .false., l_input_wp2vp2 = .false., l_input_iss_frac = .false., &
     l_input_radht = .false., &
@@ -213,14 +213,14 @@ module inputfields
 !-----------------------------------------------------------------------
 
 !-----------------------------------------------------------------------
-  subroutine stat_fields_reader( gr, timestep, &
+  subroutine stat_fields_reader( gr, timestep, hydromet_dim, hm_metadata, &
                                  um, upwp, vm, vpwp, up2, vp2, rtm, &
                                  wprtp, thlm, wpthlp, rtp2, rtp3, &
                                  thlp2, thlp3, rtpthlp, wp2, wp3, &
                                  p_in_Pa, exner, rcm, cloud_frac, &
                                  wpthvp, wp2thvp, rtpthvp, thlpthvp, &
                                  wp2rtp, wp2thlp, uprcp, vprcp, &
-                                 rc_coef, wp4, wpup2, wpvp2, wp2up2, &
+                                 rc_coef_zm, wp4, wpup2, wpvp2, wp2up2, &
                                  wp2vp2, ice_supersat_frac, &
                                  wm_zt, rho, rho_zm, rho_ds_zm, &
                                  rho_ds_zt, thv_ds_zm, thv_ds_zt, &
@@ -244,7 +244,6 @@ module inputfields
     use grid_class, only: & 
         zt2zm ! Procedure(s)
 
- 
     use constants_clubb, only:  &
         rt_tol,    & ! Variable(s)
         thl_tol,   &
@@ -258,11 +257,8 @@ module inputfields
     use pdf_parameter_module, only: &
         pdf_parameter    ! Type(s)
 
-    use parameters_model, only: &
-        hydromet_dim   ! Integer
-
-    use array_index, only:  & 
-        iirr, iiNr, iirs, iiri, iirg, iiNi, iiNg, iiNs
+    use corr_varnce_module, only: &
+      hm_metadata_type
 
     use stat_file_utils, only: & 
         LES_grid_to_CLUBB_grid, & ! Procedure(s)
@@ -285,13 +281,23 @@ module inputfields
 
     implicit none
 
-    type (grid), target, intent(in) :: gr
 
     ! External
     intrinsic :: max, trim, any
 
     ! Arguments
-    integer, intent(in) :: timestep
+
+    type (grid), target, intent(in) :: &
+      gr
+
+    integer, intent(in) :: &
+      timestep
+
+    integer, intent(in) :: &
+      hydromet_dim
+
+    type (hm_metadata_type), intent(in) :: &
+      hm_metadata
 
     real( kind = core_rknd ), dimension(gr%nz), target, intent(inout) :: &
       um,         & ! eastward grid-mean wind component (thermo. levs.)  [m/s]
@@ -325,7 +331,7 @@ module inputfields
       wp2thlp,           & ! w'^2 thl' (thermodynamic levels)     [m^2/s^2 K]
       uprcp,             & ! < u' r_c' > (momentum levels)        [(m/s)(kg/kg)]
       vprcp,             & ! < v' r_c' > (momentum levels)        [(m/s)(kg/kg)]
-      rc_coef,           & ! Coef of X'r_c' in Eq. (34) (t-levs.) [K/(kg/kg)]
+      rc_coef_zm,        & ! Coef of X'r_c' in Eq. (34) (m-levs.) [K/(kg/kg)]
       wp4,               & ! w'^4 (momentum levels)               [m^4/s^4]
       wpup2,             & ! w'u'^2 (thermodynamic levels)        [m^3/s^3]
       wpvp2,             & ! w'v'^2 (thermodynamic levels)        [m^3/s^3]
@@ -406,7 +412,20 @@ module inputfields
       coamps_variables, & ! A list of coamps variables to read in.
       RAMS_variables ! A list of RAMS LES variables to read in.
 
+
+    integer :: & 
+      iirr, iiNr, iirs, iiri, iirg, iiNi, iiNg, iiNs
+
     ! ---- Begin Code ----
+
+    iirr = hm_metadata%iirr
+    iiNr = hm_metadata%iiNr
+    iirs = hm_metadata%iirs
+    iiri = hm_metadata%iiri
+    iirg = hm_metadata%iirg
+    iiNi = hm_metadata%iiNi
+    iiNg = hm_metadata%iiNg
+    iiNs = hm_metadata%iiNs
 
     select case ( stats_input_type )
 
@@ -523,7 +542,7 @@ module inputfields
       l_fatal_error = l_fatal_error .or. l_read_error
 
       call get_clubb_variable_interpolated &
-           ( l_input_wm_zt, stat_files(clubb_zt), "wm", gr%nz, timestep, &
+           ( l_input_wm_zt, stat_files(clubb_zt), "wm_zt", gr%nz, timestep, &
              gr%zt(1,:), wm_zt, l_read_error )
 
       l_fatal_error = l_fatal_error .or. l_read_error
@@ -661,12 +680,6 @@ module inputfields
       call get_clubb_variable_interpolated &
            ( l_input_wpvp2, stat_files(clubb_zt), "wpvp2", gr%nz, &
              timestep, gr%zt(1,:), wpvp2, l_read_error )
-
-      l_fatal_error = l_fatal_error .or. l_read_error
-
-      call get_clubb_variable_interpolated &
-           ( l_input_rc_coef, stat_files(clubb_zt), "rc_coef", gr%nz, &
-             timestep, gr%zt(1,:), rc_coef, l_read_error )
 
       l_fatal_error = l_fatal_error .or. l_read_error
 
@@ -992,6 +1005,12 @@ module inputfields
       call get_clubb_variable_interpolated &
            ( l_input_thlprcp, stat_files(clubb_zm), "thlprcp", gr%nz, timestep, &
              gr%zm(1,:), thlprcp, l_read_error )
+
+      l_fatal_error = l_fatal_error .or. l_read_error
+
+      call get_clubb_variable_interpolated &
+           ( l_input_rc_coef_zm, stat_files(clubb_zm), "rc_coef_zm", gr%nz, &
+             timestep, gr%zm(1,:), rc_coef_zm, l_read_error )
 
       l_fatal_error = l_fatal_error .or. l_read_error
 

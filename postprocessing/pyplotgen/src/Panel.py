@@ -31,12 +31,17 @@ class Panel:
 
     VALID_PANEL_TYPES = [TYPE_PROFILE, TYPE_BUDGET, TYPE_TIMESERIES, TYPE_TIMEHEIGHT, TYPE_ANIMATION, TYPE_SUBCOLUMN]
 
-    def __init__(self, plots, panel_type="profile", title="Unnamed panel", dependent_title="dependent variable",
-                 sci_scale = None, centered = False):
+    def __init__(self, plots, bkgrnd_rcm_tavg, altitude_bkgrnd_rcm, start_alt_idx, end_alt_idx,
+                 panel_type="profile", title="Unnamed panel", dependent_title="dependent variable", sci_scale = None,
+                 centered = False, background_rcm = False):
         """
         Creates a new panel
 
         :param plots: list of Line objects to plot onto the panel
+        :param bkgrnd_rcm_tavg: Time-average vertical profile of rcm that can be displayed in the background of plots.
+        :param altitude_bkgrnd_rcm: Heights corresponding with the background rcm profile.
+        :param start_alt_idx: Index of bkgrnd_rcm_tavg that corresponds with bottom of the plot.
+        :param end_alt_idx: Index of bkgrnd_rcm_tavg that corresponds with top of the plot.
         :param panel_type: Type of panel being plotted (i.e. budget, profile, timeseries)
         :param title: The title of this plot (e.g. 'Liquid water potential tempature')
         :param dependent_title: Label of the dependent axis (labels the x-axis for all panel types except timeseries).
@@ -44,9 +49,14 @@ class Panel:
             If not specified, the matplotlib default sci scaling will be used.
         :param centered: If True, the Panel will be centered around 0.
             Profile plots are usually centered, while budget plots are not.
+        :param background_rcm: Show a height-based "contour" plot of time-averaged rcm behind CLUBB profiles.
         """
         self.panel_type = panel_type
         self.all_plots = plots
+        self.bkgrnd_rcm_tavg = bkgrnd_rcm_tavg
+        self.altitude_bkgrnd_rcm = altitude_bkgrnd_rcm
+        self.start_alt_idx = start_alt_idx
+        self.end_alt_idx = end_alt_idx
         self.title = title
         self.dependent_title = dependent_title
         self.x_title = "x title unassigned"
@@ -54,6 +64,7 @@ class Panel:
         self.__init_axis_titles__()
         self.sci_scale = sci_scale
         self.centered = centered
+        self.background_rcm = background_rcm
 
     def __init_axis_titles__(self):
         """
@@ -94,6 +105,7 @@ class Panel:
         :paired_plots: If no format is specified and paired_plots is True,
             use the color/style rotation specified in Style_definitions.py
         :return: None
+        Warning! Argument `replace_images` is unused here!
         """
         # Suppress deprecation warnings
         with warnings.catch_warnings():
@@ -222,7 +234,10 @@ class Panel:
             box = ax.get_position()
             ax.set_position([box.x0, box.y0, box.width * 0.8, box.height])
             # Put a legend to the right of the current axis
-            ax.legend(loc='center left', bbox_to_anchor=(1, 0.5))
+            if not self.background_rcm:
+                ax.legend(loc='center left', bbox_to_anchor=(1, 0.5))
+            else:
+                ax.legend(loc='upper right', bbox_to_anchor=(1, 1))
 
         # Center plots
         if max_panel_value != 0:
@@ -234,8 +249,26 @@ class Panel:
         xlim = plt.xlim()
         if xlim[0] == 0 and xlim[1] == 0:
             plt.xlim=(-1,1)
-        if self.panel_type == Panel.TYPE_PROFILE and 0 >= xlim[0] and 0 <= xlim[1]:
+        if self.panel_type == Panel.TYPE_PROFILE and xlim[0] <= 0 <= xlim[1]:
             plt.axvline(x=0, color='grey', ls='-')
+
+        # Background rcm contour plot
+        if self.background_rcm:
+            num_points = self.end_alt_idx - self.start_alt_idx + 1
+            bkgrnd_rcm_tavg_contours = np.eye( num_points )
+            for i in range(num_points):
+                for j in range(num_points):
+                    bkgrnd_rcm_tavg_contours[i,j] = self.bkgrnd_rcm_tavg[self.start_alt_idx+i]
+            min_value = min( self.bkgrnd_rcm_tavg )
+            max_value = max( self.bkgrnd_rcm_tavg )
+            x_vector_contour = np.zeros( num_points )
+            x_diff = xlim[1] - xlim[0]
+            x_interval = x_diff / ( num_points - 1 )
+            for k in range(num_points):
+                x_vector_contour[k] = xlim[0] + float(k) * x_interval
+            plt.contourf( x_vector_contour, self.altitude_bkgrnd_rcm[self.start_alt_idx:self.end_alt_idx+1], bkgrnd_rcm_tavg_contours,
+                          vmin=min_value, vmax=2.0*max_value, cmap=plt.set_cmap("gist_yarg") )
+            plt.colorbar( label="rcm [kg/kg]", orientation="vertical" )
 
         # Create folders
         # Because os.mkdir("output") can fail and prevent os.mkdir("output/" + casename) from being called we must

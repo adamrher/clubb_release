@@ -52,8 +52,8 @@ program clubb_thread_test
   
   ! Local Variables
   ! Run information
-  real( kind = core_rknd ), dimension(nparams) :: & 
-    params  ! Array of the model constants
+  real( kind = core_rknd ), dimension(1,nparams) :: & 
+    clubb_params  ! Array of the model constants
 
   real( kind = core_rknd ) :: & 
     C1, C1b, C1c, C2rt, C2thl, C2rtthl, & 
@@ -75,8 +75,9 @@ program clubb_thread_test
     rtp2_clip_coef, C_invrs_tau_bkgnd, C_invrs_tau_sfc, &
     C_invrs_tau_shear, C_invrs_tau_N2, C_invrs_tau_N2_wp2, &
     C_invrs_tau_N2_xp2, C_invrs_tau_N2_wpxp, C_invrs_tau_N2_clear_wp3, &
-    C_invrs_tau_wpxp_Ri, C_invrs_tau_wpxp_N2_thresh, &
-    Cx_min, Cx_max, Richardson_num_min, Richardson_num_max, a3_coef_min, a_const, bv_efold
+    C_invrs_tau_wpxp_Ri, C_invrs_tau_wpxp_N2_thresh, Cx_min, Cx_max, &
+    Richardson_num_min, Richardson_num_max, &
+    wpxp_Ri_exp, a3_coef_min, a_const, bv_efold, z_displace
 
   ! Internal variables
   integer, dimension(ncases) :: err_code_saves
@@ -118,11 +119,11 @@ program clubb_thread_test
                C_invrs_tau_N2_wp2, C_invrs_tau_N2_xp2, &
                C_invrs_tau_N2_wpxp, C_invrs_tau_N2_clear_wp3, &
                C_invrs_tau_wpxp_Ri, C_invrs_tau_wpxp_N2_thresh, &
-               Cx_min, Cx_max, Richardson_num_min, &
-               Richardson_num_max, a3_coef_min, a_const, bv_efold )
+               Cx_min, Cx_max, Richardson_num_min, Richardson_num_max, &
+               wpxp_Ri_exp, a3_coef_min, a_const, bv_efold, z_displace )
 
   ! Run the model in parallel
-!$omp parallel do default(shared), private(iter, params, iunit), &
+!$omp parallel do default(shared), private(iter, clubb_params, iunit), &
 !$omp   shared(err_code_saves)
   do iter = 1, ncases
 #ifdef _OPENMP
@@ -131,7 +132,7 @@ program clubb_thread_test
     iunit = 10
 #endif
     ! Read in model parameter values
-    call read_parameters( iunit, namelist_filename(iter), &
+    call read_parameters( 1, iunit, namelist_filename(iter), &
                           C1, C1b, C1c, C2rt, C2thl, C2rtthl, &
                           C4, C_uu_shr, C_uu_buoy, C6rt, C6rtb, C6rtc, &
                           C6thl, C6thlb, C6thlc, C7, C7b, C7c, C8, C8b, C10, &
@@ -154,12 +155,12 @@ program clubb_thread_test
                           C_invrs_tau_N2_wp2, C_invrs_tau_N2_xp2, &
                           C_invrs_tau_N2_wpxp, C_invrs_tau_N2_clear_wp3, &
                           C_invrs_tau_wpxp_Ri, C_invrs_tau_wpxp_N2_thresh, &
-                          Cx_min, Cx_max, Richardson_num_min, &
-                          Richardson_num_max, a3_coef_min, a_const, bv_efold, &
-                          params )
+                          Cx_min, Cx_max, Richardson_num_min, Richardson_num_max, &
+                          wpxp_Ri_exp, a3_coef_min, a_const, bv_efold, z_displace, &
+                          clubb_params )
 
     ! Run the model
-    call run_clubb( params, namelist_filename(iter), l_stdout )
+    call run_clubb( 1, clubb_params, namelist_filename(iter), l_stdout )
 
     err_code_saves(iter) = err_code
 

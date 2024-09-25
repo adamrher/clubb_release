@@ -45,9 +45,9 @@ class PyPlotGen:
     def __init__(self, output_folder, clubb_folders=None, replace=False, les=False, cgbest=False, hoc=False,
                  benchmark_only=False, nightly=False, zip=False, thin=False, no_legends=False, ensemble=False,
                  e3sm_folders=[""], sam_folders=[""], wrf_folders=[""], cam_folders=[""], priority_vars=False,
-                 plot_budgets=False, bu_morr=False, diff=None, show_alphabetic_id=False,
-                 time_height=False, animation=None, samstyle=False, disable_multithreading=False, pdf=False,
-                 pdf_filesize_limit=None, plot_subcolumns=False, image_extension=".png"):
+                 plot_budgets=False, bu_morr=False, lumped_buoy_budgets=False, background_rcm=False, diff=None,
+                 show_alphabetic_id=False, time_height=False, animation=None, samstyle=False, disable_multithreading=False,
+                 pdf=False, pdf_filesize_limit=None, plot_subcolumns=False, image_extension=".png"):
         """
         This creates an instance of PyPlotGen. Each parameter is a command line parameter passed in from the argparser
         below.
@@ -85,6 +85,8 @@ class PyPlotGen:
         :param plot_budgets: If True, plot all defined budgets of moments.
         :param bu_morr: For morrison microphysics: If True, break microphysical source terms into component processes.
             Not implemented.
+        :param lumped_buoy_budgets: Lump together wpxp_bp and wpxp_pr3 terms in CLUBB's budgets
+        :param background_rcm: Show a height-based "contour" plot of time-averaged rcm behind CLUBB profiles.
         :param diff: Plot the difference between two clubb folders. (MORE DESCRIPTION)
         :param show_alphabetic_id: If True, add an identifying character to the top right of a panel.
         :param time_height: If True, plot time-height (contourf) plots instead of profile-like plots
@@ -109,6 +111,8 @@ class PyPlotGen:
         self.plot_budgets = plot_budgets
         self.plot_subcolumns = plot_subcolumns
         self.bu_morr = bu_morr
+        self.lumped_buoy_budgets = lumped_buoy_budgets
+        self.background_rcm = background_rcm
         self.diff = diff
         self.cases_plotted = []
         self.clubb_datasets = None
@@ -415,9 +419,9 @@ class PyPlotGen:
                                                   plot_r408=self.cgbest, plot_hoc=self.hoc, e3sm_folders=self.e3sm_folders,
                                                   cam_folders=self.cam_folders, time_height=self.time_height,
                                                   animation=self.animation, samstyle=self.sam_style_budgets, 
-                                                  plot_subcolumns=self.plot_subcolumns,
-                                                  image_extension=self.image_extension, total_panels_to_plot=0,
-                                                  priority_vars=self.priority_vars)
+                                                  plot_subcolumns=self.plot_subcolumns, lumped_buoy_budgets=self.lumped_buoy_budgets,
+                                                  background_rcm=self.background_rcm, image_extension=self.image_extension,
+                                                  total_panels_to_plot=0, priority_vars=self.priority_vars)
             # Call plot function of case instance
             case_gallery_setup.plot(self.output_folder, replace_images=self.replace_images, no_legends=self.no_legends,
                                     thin_lines=self.thin, show_alphabetic_id=self.show_alphabetic_id,
@@ -639,6 +643,10 @@ def __processArguments__():
     parser.add_argument("--no-legends", help="Plot without legend boxes defining the line types.", action="store_true")
     parser.add_argument("-b", "--plot-budgets", help="Plot all defined budgets of moments.",
                         action="store_true")
+    parser.add_argument("--lumped-buoy-budgets", help="Lump together wpxp_bp and wpxp_pr3 terms in CLUBB's budgets.",
+                        action="store_true")
+    parser.add_argument("--background-rcm", help="Show a height-based 'contour' plot of time-averaged rcm behind CLUBB profiles.",
+                        action="store_true")
     parser.add_argument("--plot-subcolumns", help="Plot all defined subcolumns.",
                         action="store_true")
     parser.add_argument("-t", "--time-height-plots",
@@ -792,10 +800,10 @@ def __processArguments__():
                           cgbest=cgbest, cam_folders=args.cam, nightly=args.nightly,
                           hoc=hoc, zip=args.zip, thin=args.thin, sam_folders=args.sam,
                           wrf_folders=args.wrf, benchmark_only=args.benchmark_only, priority_vars=args.priority_variables,
-                          no_legends=args.no_legends, plot_budgets=args.plot_budgets,
-                          bu_morr=args.bu_morr, diff=args.diff, show_alphabetic_id=args.show_alphabetic_id,
-                          time_height=args.time_height_plots, animation=args.movies, samstyle=args.sam_style_budgets,
-                          disable_multithreading=args.disable_multithreading, pdf=args.pdf,
+                          no_legends=args.no_legends, plot_budgets=args.plot_budgets, bu_morr=args.bu_morr,
+                          lumped_buoy_budgets=args.lumped_buoy_budgets, background_rcm=args.background_rcm, diff=args.diff,
+                          show_alphabetic_id=args.show_alphabetic_id, time_height=args.time_height_plots, animation=args.movies,
+                          samstyle=args.sam_style_budgets, disable_multithreading=args.disable_multithreading, pdf=args.pdf,
                           pdf_filesize_limit=args.pdf_filesize_limit, plot_subcolumns=args.plot_subcolumns,
                           image_extension=image_extension)
     return pyplotgen

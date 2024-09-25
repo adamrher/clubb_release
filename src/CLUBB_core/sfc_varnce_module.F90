@@ -12,13 +12,16 @@ module sfc_varnce_module
   contains
 
   !=============================================================================
-  subroutine calc_sfc_varnce( nz, ngrdcol, gr, dt, sfc_elevation, & 
+  subroutine calc_sfc_varnce( nz, ngrdcol, sclr_dim, sclr_idx, &
+                              gr, dt, sfc_elevation, & 
                               upwp_sfc, vpwp_sfc, wpthlp, wprtp_sfc, & 
                               um, vm, Lscale_up, wpsclrp_sfc, & 
                               lhs_splat_wp2, tau_zm, &
                               !wp2_splat_sfc, tau_zm_sfc, &
                               l_vary_convect_depth, &
-                              clubb_params, &
+                              up2_sfc_coef, &
+                              a_const, &
+                              stats_metadata, &
                               stats_zm, &
                               wp2, up2, vp2, & 
                               thlp2, rtp2, rtpthlp, & 
@@ -57,14 +60,6 @@ module sfc_varnce_module
         fstderr,    &
         wp2_max
 
-    use parameters_model, only: & 
-        sclr_dim  ! Variable(s)
-
-    use parameter_indices, only: &
-        nparams, &
-        ia_const, &
-        iup2_sfc_coef
-
     use numerical_check, only: & 
         sfc_varnce_check ! Procedure
 
@@ -74,11 +69,10 @@ module sfc_varnce_module
         clubb_fatal_error              ! Constant
 
     use array_index, only: &
-        iisclr_rt, & ! Index for a scalar emulating rt
-        iisclr_thl   ! Index for a scalar emulating thetal
+        sclr_idx_type
 
     use stats_type, only: &
-      stats ! Type
+        stats ! Type
 
     use stats_type_utilities, only: & 
         stat_end_update_pt,   & ! Procedure(s)
@@ -86,13 +80,7 @@ module sfc_varnce_module
         stat_update_var_pt
 
     use stats_variables, only: &
-        l_stats_samp,  &
-        ithlp2_sf,     &
-        irtp2_sf,      &
-        irtpthlp_sf,   &
-        iup2_sf,       &
-        ivp2_sf,       &
-        iwp2_sf
+        stats_metadata_type
 
     use clubb_precision, only: &
         core_rknd ! Variable(s)
@@ -121,7 +109,11 @@ module sfc_varnce_module
     !-------------------------- Input Variables --------------------------
     integer, intent(in) :: &
       nz, &
-      ngrdcol
+      ngrdcol, &
+      sclr_dim
+
+    type (sclr_idx_type), intent(in) :: &
+      sclr_idx
 
     type(grid), intent(in) :: &
       gr
@@ -151,8 +143,12 @@ module sfc_varnce_module
     logical, intent(in) :: &
       l_vary_convect_depth
 
-    real( kind = core_rknd ), dimension(nparams), intent(in) :: &
-      clubb_params    ! Array of CLUBB's tunable parameters    [units vary]
+    real( kind = core_rknd ), dimension(ngrdcol) :: &
+      up2_sfc_coef,   & ! CLUBB tunable parameter up2_sfc_coef   [-]
+      a_const           ! Coefficient in front of wp2, up2, and vp2
+
+    type (stats_metadata_type), intent(in) :: &
+      stats_metadata
 
     !-------------------------- InOut Variables --------------------------
     type (stats), target, intent(inout), dimension(ngrdcol) :: &
@@ -196,10 +192,6 @@ module sfc_varnce_module
     real( kind = core_rknd ) :: &
       Lngth    ! Monin-Obukhov length [m]
 
-    real( kind = core_rknd ) :: &
-      up2_sfc_coef,   & ! CLUBB tunable parameter up2_sfc_coef   [-]
-      a_const           ! Coefficient in front of wp2, up2, and vp2
-
     integer :: i, k, sclr ! Loop index
 
     !-------------------------- Begin Code --------------------------
@@ -208,35 +200,33 @@ module sfc_varnce_module
     !$acc                    um_sfc_sqd, vm_sfc_sqd, usp2_sfc, vsp2_sfc, &
     !$acc                    ustar, zeta, wp2_splat_sfc_correction )
 
-    up2_sfc_coef = clubb_params(iup2_sfc_coef)
-
     ! Reflect surface varnce changes in budget
-    if ( l_stats_samp ) then
+    if ( stats_metadata%l_stats_samp ) then
 
       !$acc update host( wp2, up2, vp2, thlp2, rtp2, rtpthlp )
 
       do i = 1, ngrdcol
-        call stat_begin_update_pt( ithlp2_sf, 1,      & ! intent(in)
+        call stat_begin_update_pt( stats_metadata%ithlp2_sf, 1,      & ! intent(in)
                                    thlp2(i,1) / dt,   & ! intent(in)
                                    stats_zm(i) )        ! intent(inout)
 
-        call stat_begin_update_pt( irtp2_sf, 1,       & ! intent(in)
+        call stat_begin_update_pt( stats_metadata%irtp2_sf, 1,       & ! intent(in)
                                    rtp2(i,1) / dt,    & ! intent(in)
                                    stats_zm(i) )        ! intent(inout)
 
-        call stat_begin_update_pt( irtpthlp_sf, 1,    & ! intent(in)
+        call stat_begin_update_pt( stats_metadata%irtpthlp_sf, 1,    & ! intent(in)
                                    rtpthlp(i,1) / dt, & ! intent(in)
                                    stats_zm(i) )        ! intent(inout)
 
-        call stat_begin_update_pt( iup2_sf, 1,        & ! intent(in)
+        call stat_begin_update_pt( stats_metadata%iup2_sf, 1,        & ! intent(in)
                                    up2(i,1) / dt,     & ! intent(in)
                                    stats_zm(i) )        ! intent(inout)
 
-        call stat_begin_update_pt( ivp2_sf, 1,        & ! intent(in)
+        call stat_begin_update_pt( stats_metadata%ivp2_sf, 1,        & ! intent(in)
                                    vp2(i,1) / dt,     & ! intent(in)
                                    stats_zm(i) ) ! intent(inout)
 
-        call stat_begin_update_pt( iwp2_sf, 1,        & ! intent(in)
+        call stat_begin_update_pt( stats_metadata%iwp2_sf, 1,        & ! intent(in)
                                    wp2(i,1) / dt,     & ! intent(in)
                                    stats_zm(i) )        ! intent(inout)
       end do
@@ -264,8 +254,6 @@ module sfc_varnce_module
     !else
     !   a_const = 0.6_core_rknd
     !end if
-
-    a_const = clubb_params(ia_const) 
 
     if ( l_andre_1978 ) then
 
@@ -545,9 +533,9 @@ module sfc_varnce_module
       ! Compute estimate for surface second order moments
       !$acc parallel loop gang vector default(present)
       do i = 1, ngrdcol
-        wp2(i,1) = a_const * uf(i)**2
-        up2(i,1) = up2_sfc_coef * a_const * uf(i)**2  ! From Andre, et al. 1978
-        vp2(i,1) = up2_sfc_coef * a_const * uf(i)**2  ! "  "
+        wp2(i,1) = a_const(i) * uf(i)**2
+        up2(i,1) = up2_sfc_coef(i) * a_const(i) * uf(i)**2  ! From Andre, et al. 1978
+        vp2(i,1) = up2_sfc_coef(i) * a_const(i) * uf(i)**2  ! "  "
       end do
       !$acc end parallel loop
 
@@ -559,17 +547,17 @@ module sfc_varnce_module
       if ( .not. l_vary_convect_depth )  then
         !$acc parallel loop gang vector default(present)
         do i = 1, ngrdcol
-          thlp2(i,1)   = 0.4_core_rknd * a_const * ( wpthlp(i,1) / uf(i) )**2
-          rtp2(i,1)    = 0.4_core_rknd * a_const * ( wprtp_sfc(i) / uf(i) )**2
-          rtpthlp(i,1) = 0.2_core_rknd * a_const * ( wpthlp(i,1) / uf(i) ) &
-                                                 * ( wprtp_sfc(i) / uf(i) )
+          thlp2(i,1)   = 0.4_core_rknd * a_const(i) * ( wpthlp(i,1) / uf(i) )**2
+          rtp2(i,1)    = 0.4_core_rknd * a_const(i) * ( wprtp_sfc(i) / uf(i) )**2
+          rtpthlp(i,1) = 0.2_core_rknd * a_const(i) * ( wpthlp(i,1) / uf(i) ) &
+                                                    * ( wprtp_sfc(i) / uf(i) )
         end do
         !$acc end parallel loop
       else
         !$acc parallel loop gang vector default(present)
         do i = 1, ngrdcol
-          thlp2(i,1)   = ( wpthlp(i,1) / uf(i) )**2 / ( max_mag_correlation_flux**2 * a_const )
-          rtp2(i,1)    = ( wprtp_sfc(i) / uf(i) )**2 / ( max_mag_correlation_flux**2 * a_const )
+          thlp2(i,1)   = ( wpthlp(i,1) / uf(i) )**2 / ( max_mag_correlation_flux**2 * a_const(i) )
+          rtp2(i,1)    = ( wprtp_sfc(i) / uf(i) )**2 / ( max_mag_correlation_flux**2 * a_const(i) )
           rtpthlp(i,1) = max_mag_correlation_flux * sqrt( thlp2(i,1) * rtp2(i,1) )
         end do
         !$acc end parallel loop
@@ -639,28 +627,28 @@ module sfc_varnce_module
             ! We use the following if..then's to make sclr_rt and sclr_thl
             ! close to the actual thlp2/rtp2 at the surface.
             ! -dschanen 25 Sep 08
-            if ( sclr == iisclr_rt ) then
+            if ( sclr == sclr_idx%iisclr_rt ) then
               ! If we are trying to emulate rt with the scalar, then we
               ! use the variance coefficient from above
-              sclrprtp(i,1,sclr) = 0.4_core_rknd * a_const &
+              sclrprtp(i,1,sclr) = 0.4_core_rknd * a_const(i) &
                                 * ( wprtp_sfc(i) / uf(i) ) * ( wpsclrp_sfc(i,sclr) / uf(i) )
             else
-              sclrprtp(i,1,sclr) = 0.2_core_rknd * a_const &
+              sclrprtp(i,1,sclr) = 0.2_core_rknd * a_const(i) &
                                 * ( wprtp_sfc(i) / uf(i) ) * ( wpsclrp_sfc(i,sclr) / uf(i) )
             endif
 
-            if ( sclr == iisclr_thl ) then
+            if ( sclr == sclr_idx%iisclr_thl ) then
               ! As above, but for thetal
-              sclrpthlp(i,1,sclr) = 0.4_core_rknd * a_const &
+              sclrpthlp(i,1,sclr) = 0.4_core_rknd * a_const(i) &
                                  * ( wpthlp(i,1) / uf(i) ) &
                                  * ( wpsclrp_sfc(i,sclr) / uf(i) )
             else
-              sclrpthlp(i,1,sclr) = 0.2_core_rknd * a_const &
+              sclrpthlp(i,1,sclr) = 0.2_core_rknd * a_const(i) &
                                  * ( wpthlp(i,1) / uf(i) ) &
                                  * ( wpsclrp_sfc(i,sclr) / uf(i) )
             endif
 
-            sclrp2(i,1,sclr) = sclr_var_coef * a_const &
+            sclrp2(i,1,sclr) = sclr_var_coef * a_const(i) &
                                * ( wpsclrp_sfc(i,sclr) / uf(i) )**2
 
             ! End Vince Larson's change.
@@ -714,32 +702,32 @@ module sfc_varnce_module
       end do
     end if
 
-    if ( l_stats_samp ) then
+    if ( stats_metadata%l_stats_samp ) then
 
       !$acc update host( wp2, up2, vp2, thlp2, rtp2, rtpthlp )
 
       do i = 1, ngrdcol
-        call stat_end_update_pt( ithlp2_sf, 1,    & ! intent(in)
+        call stat_end_update_pt( stats_metadata%ithlp2_sf, 1,    & ! intent(in)
                                  thlp2(i,1) / dt, & ! intent(in)
                                  stats_zm(i) )      ! intent(inout)
 
-        call stat_end_update_pt( irtp2_sf, 1,     & ! intent(in)
+        call stat_end_update_pt( stats_metadata%irtp2_sf, 1,     & ! intent(in)
                                  rtp2(i,1) / dt,  & ! intent(in)
                                  stats_zm(i) )      ! intent(inout)
 
-        call stat_end_update_pt( irtpthlp_sf, 1,    & ! intent(in)
+        call stat_end_update_pt( stats_metadata%irtpthlp_sf, 1,    & ! intent(in)
                                  rtpthlp(i,1) / dt, & ! intent(in)
                                  stats_zm(i) )        ! intent(inout)
 
-        call stat_end_update_pt( iup2_sf, 1,    & ! intent(in)
+        call stat_end_update_pt( stats_metadata%iup2_sf, 1,    & ! intent(in)
                                  up2(i,1) / dt, & ! intent(in)
                                  stats_zm(i) )    ! intent(inout)
 
-        call stat_end_update_pt( ivp2_sf, 1,    & ! intent(in)
+        call stat_end_update_pt( stats_metadata%ivp2_sf, 1,    & ! intent(in)
                                  vp2(i,1) / dt, & ! intent(in)
                                  stats_zm(i) )    ! intent(inout)
 
-        call stat_end_update_pt( iwp2_sf, 1,    & ! intent(in)
+        call stat_end_update_pt( stats_metadata%iwp2_sf, 1,    & ! intent(in)
                                  wp2(i,1) / dt, & ! intent(in)
                                  stats_zm(i) )    ! intent(inout)
       end do
@@ -748,11 +736,12 @@ module sfc_varnce_module
     if ( clubb_at_least_debug_level( 2 ) ) then 
 
       !$acc update host( wp2, up2, vp2, thlp2, rtp2, rtpthlp, &
-      !$acc              sclrp2, sclrprtp, sclrpthlp, &
       !$acc              upwp_sfc, vpwp_sfc, wpthlp, wprtp_sfc )
 
+      !$acc update host( sclrp2, sclrprtp, sclrpthlp ) if ( sclr_dim > 0 )
+
       do i = 1, ngrdcol
-        call sfc_varnce_check( wp2(i,1), up2(i,1), vp2(i,1),                    & ! intent(in)
+        call sfc_varnce_check( sclr_dim, wp2(i,1), up2(i,1), vp2(i,1),          & ! intent(in)
                                thlp2(i,1), rtp2(i,1), rtpthlp(i,1),             & ! intent(in)
                                sclrp2(i,1,:), sclrprtp(i,1,:), sclrpthlp(i,1,:) ) ! intent(in)
       end do
