@@ -651,7 +651,8 @@ module advance_clubb_core_module
       wp3_zm       ! w'^3        [m^3/s^3]
 
     real( kind = core_rknd ), dimension(ngrdcol,nz) :: &
-      Lscale,      & ! Length scale                          [m]
+!+++arh
+      !Lscale,      & ! Length scale                          [m]
       Lscale_up,   & ! Length scale (upwards component)      [m]
       Lscale_down, & ! Length scale (downwards component)    [m]
       Lscale_zm      ! Length scale on momentum levels       [m]
